@@ -2,6 +2,7 @@ from muar_sfc.algorithms.betweenness_centrality_algorithm import BetweennessCent
 from muar_sfc.algorithms.bruno_alg import BrunoAlg
 from muar_sfc.algorithms.bruno_alg_2 import BrunoAlgNew
 from muar_sfc.algorithms.darsppo import DARSPPO
+from muar_sfc.algorithms.dag_greedy import DAGGreedyAlgorithm
 from muar_sfc.algorithms.dynamic_programming_algorithm import DynamicProgrammingAlgorithm
 from muar_sfc.algorithms.genetic_alg import Genetic
 from muar_sfc.algorithms.greedy_algorithm import GreedyAlgorithm
@@ -21,7 +22,9 @@ from muar_sfc.algorithms.vegeta import Vegeta
 
 class AlgorithmInstantiator:
     def instantiate_algorithm(self, type):
-        if type == "musfico":
+        if type in ("dag_greedy", "dag"):
+            alg = DAGGreedyAlgorithm()
+        elif type == "musfico":
             alg = Musfico()
         elif type == "new_alg":
             alg = NewAlg()
