@@ -81,16 +81,124 @@ class MuarScenario:
         self.config_dict = {
             "n_sessions": args.n_sessions,
             "n_players": args.n_players,
-            "mobility_activated": (args.mobility == "y"),
-            "shareable": (args.share == "y"),
-            "shareable_band": (args.shareband == "y"),
-            "allow_delay": (args.allow_delay == "y"),
+            "mobility_activated": bool(args.mobility) if isinstance(args.mobility, bool) else (args.mobility == "y"),
+            "shareable": bool(args.share) if isinstance(args.share, bool) else (args.share == "y"),
+            "shareable_band": bool(args.shareband) if isinstance(args.shareband, bool) else (args.shareband == "y"),
+            "allow_delay": bool(args.allow_delay) if isinstance(args.allow_delay, bool) else (args.allow_delay == "y"),
+            "dag": getattr(args, "dag", False),
+            "sync_tolerance": getattr(args, "sync_tolerance", 5.0),
         }
+
+    def generate_dag_session(self, parameter):
+        """
+        Gera uma sessão de MUAR estruturada como DAG verdadeiro:
+        - IA_DET_FT executa UMA única vez por jogador (sem desperdício de 50% de CPU).
+        - Bifurcação: IA_DET_FT divide o tráfego para MA_region (Cache) e UNI_player (Únicos).
+        - Junção: Ambos os ramos convergem em RE_player (Renderização) com sincronização temporal.
+        - Transmissão: RE_player -> EC_TC_player -> DST.
+        """
+        self.session_counter += 1
+        counter = str(self.session_counter)
+        n_players = self.config_dict["n_players"]
+
+        print("Total Number of DAG MUAR SFCs in session:", self.session_counter)
+        routers = self.topology.get_topology_info()["routers"]
+        closer_router = random.choice(routers)
+
+        lifetime = np.random.poisson(self.max_duration)
+        duration = lifetime
+
+        players_dag_sfc_list = []
+
+        for i in range(1, n_players + 1):
+            vnf_list = [
+                {
+                    "type": 2,
+                    "name": f"IA_DET_FT_{counter}",
+                    "CPU": round(IA_DET_FT, 2),
+                    "cache": 0,
+                    "in_bw": round(IA_bw, 2),
+                    "out_bw": round(IA_DET_FT_bw, 2),
+                    "latency": round((IA_DET_FT * total_inst / servers_mips) * 10, 2),
+                },
+                {
+                    "type": 2,
+                    "name": f"MA_region_{closer_router}",
+                    "CPU": round(MA, 2),
+                    "cache": round(CA_size, 2),
+                    "in_bw": round(IA_DET_FT_bw, 2),
+                    "out_bw": round(MA_bw, 2),
+                    "latency": round((MA * total_inst / servers_mips) * 10, 2),
+                },
+                {
+                    "type": 2,
+                    "name": f"UNI_p{i}_{counter}",
+                    "CPU": round(UNI, 2),
+                    "cache": 0,
+                    "in_bw": round(IA_DET_FT_bw, 2),
+                    "out_bw": round(UNI_bw, 2),
+                    "latency": round((UNI * total_inst / servers_mips) * 10, 2),
+                },
+                {
+                    "type": 2,
+                    "name": f"RE_p{i}_{counter}",
+                    "CPU": round(RE, 2),
+                    "cache": 0,
+                    "in_bw": round(RE_bw, 2),
+                    "out_bw": round(RE_bw, 2),
+                    "latency": round((RE * total_inst / servers_mips) * 10, 2),
+                },
+                {
+                    "type": 2,
+                    "name": f"EC_TC_p{i}_{counter}",
+                    "CPU": round(EC_TC, 2),
+                    "cache": 0,
+                    "in_bw": round(RE_bw, 2),
+                    "out_bw": round(EC_TC_bw, 2),
+                    "latency": round((EC_TC * total_inst / servers_mips) * 10, 2),
+                },
+            ]
+
+            # Dependências direcionadas do DAG (u -> v com bandwidth)
+            dependencies = [
+                ("src", f"IA_DET_FT_{counter}", IA_bw),
+                (f"IA_DET_FT_{counter}", f"MA_region_{closer_router}", MA_bw),
+                (f"IA_DET_FT_{counter}", f"UNI_p{i}_{counter}", UNI_bw),
+                (f"MA_region_{closer_router}", f"RE_p{i}_{counter}", MA_bw),
+                (f"UNI_p{i}_{counter}", f"RE_p{i}_{counter}", UNI_bw),
+                (f"RE_p{i}_{counter}", f"EC_TC_p{i}_{counter}", EC_TC_bw),
+                (f"EC_TC_p{i}_{counter}", "dst", EC_TC_bw),
+            ]
+
+            dag_dict = {
+                "name": f"sfc_dag_p{i}_{counter}",
+                "vnf_list": vnf_list,
+                "dependencies": dependencies,
+                "bandwidth": EC_TC_bw,
+                "src_node": self.src_node,
+                "dst_node": f"{i}{counter}",
+                "closer_router": closer_router,
+                "duration": duration,
+                "latency": min_latency_acc,
+            }
+
+            sfc_dag = SFCGenerator(dag_dict).generate()
+            sfc_dag.sync_tolerance = float(self.config_dict.get("sync_tolerance", 5.0))
+            players_dag_sfc_list.append([sfc_dag])
+
+        for player_sfcs in players_dag_sfc_list:
+            self.sfc_queue.put_sfc(player_sfcs)
+
+        if self.session_counter >= self.config_dict["n_sessions"]:
+            self.sfc_poisson_emitter.stop()
 
     def generate_sfc_session(self, parameter):
         """
         Gera uma sessão de MUAR SFC.
         """
+        if self.config_dict.get("dag", False):
+            return self.generate_dag_session(parameter)
+
         self.session_counter += 1
         counter = str(self.session_counter)
         n_players = self.config_dict["n_players"]

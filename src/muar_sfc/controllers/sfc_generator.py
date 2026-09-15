@@ -55,14 +55,29 @@ class SFCGenerator:
         sfc.duration = self.duration
         vnfs_list.append(src_vnf)
 
+        vnfs_by_name = {"src": src_vnf, "dst": dst_vnf}
+
         for vnf_dict in self.vnf_id_list:
             vnf = VNFGenerator.generate(vnf_dict)
             vnfs_list.append(vnf)
+            vnfs_by_name[vnf.id] = vnf
             sfc.add_vnf(vnf)
 
         vnfs_list.append(dst_vnf)
-        for i in range(0, len(vnfs_list) - 1):
-            sfc.connect_two_vnfs(vnfs_list[i], vnfs_list[i + 1])
+
+        dependencies = self.sfc_dict.get("dependencies", None)
+        if dependencies:
+            # DAG Mode: Conecta com base nas dependências explícitas
+            for dep in dependencies:
+                u_name, v_name = dep[0], dep[1]
+                bw = dep[2] if len(dep) > 2 else self.bandwidth
+                u_vnf = vnfs_by_name[u_name]
+                v_vnf = vnfs_by_name[v_name]
+                sfc.add_dependency(u_vnf, v_vnf, bandwidth=bw)
+        else:
+            # Linear Legacy Mode: Conexão sequencial padrão
+            for i in range(0, len(vnfs_list) - 1):
+                sfc.connect_two_vnfs(vnfs_list[i], vnfs_list[i + 1])
 
         # sfc.set_input_throughput(self.bandwidth)
         sfc.update()
