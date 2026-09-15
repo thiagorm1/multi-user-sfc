@@ -103,6 +103,8 @@ Autores
 
 Hugo Leonardo — hugosantos@ufpa.br
 
+Thiago Ribeiro - thiago.marques@icen.ufpa.br
+
 David Galhego — david.galhego@icen.ufpa.br
 
 Matheus Morais de Brito
