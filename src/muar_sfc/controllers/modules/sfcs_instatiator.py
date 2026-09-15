@@ -688,6 +688,8 @@ class SFCInstatiator:
             edge["bandwidth_used"] = edge.get("bandwidth_used", 0) + bw_req
             return latency
 
+        is_dag_sfc = hasattr(sfc, "is_dag") and sfc.is_dag() and sfc.graph.number_of_edges() > 0
+
         for ms_name, path in route_info.items():
             if ms_name in ["src", "dst"]: continue
 
@@ -705,6 +707,39 @@ class SFCInstatiator:
                     comm_latency = allocate_bandwidth(u, v, vnf, ms_name)
                     total_latency += comm_latency
                     tsaber["comunicacao"].setdefault(ms_name, []).append({"latencia_comm": comm_latency})
+
+        # Validação específica para DAG com Bifurcação e Sincronização (MUAR)
+        if is_dag_sfc:
+            fork_nodes = [n for n, deg in sfc.graph.out_degree() if deg > 1]
+            join_nodes = [n for n, deg in sfc.graph.in_degree() if deg > 1]
+
+            if fork_nodes and join_nodes:
+                fork_id, join_id = fork_nodes[0], join_nodes[0]
+                # Encontra todos os caminhos entre o ponto de bifurcação e o ponto de junção
+                branch_paths = list(nx.all_simple_paths(sfc.graph, source=fork_id, target=join_id))
+
+                if len(branch_paths) >= 2:
+                    branch_lats = []
+                    for b_path in branch_paths:
+                        b_lat = 0.0
+                        for v_name in b_path[1:-1]:
+                            b_lat += tsaber["computacao"].get(v_name, {}).get("latencia_comp", 0.0)
+                            comm_list = tsaber["comunicacao"].get(v_name, [])
+                            b_lat += sum(item["latencia_comm"] for item in comm_list)
+                        branch_lats.append(b_lat)
+
+                    delta_sync = abs(branch_lats[0] - branch_lats[1])
+                    sync_tol = getattr(sfc, "sync_tolerance", 5.0)
+
+                    if delta_sync > sync_tol:
+                        raise ValueError(
+                            f"Violação de Sincronização Inter-Modal: delta_sync={delta_sync:.2f}ms > tolerância={sync_tol}ms"
+                        )
+
+                    # No DAG, os ramos bifurcados rodam em paralelo:
+                    # subtrai o ramo mais rápido da soma total (latência ponta a ponta é dada pelo caminho crítico)
+                    diff_to_subtract = min(branch_lats[0], branch_lats[1])
+                    total_latency = max(0.0, total_latency - diff_to_subtract)
 
         tot_comp = sum(d["latencia_comp"] for d in tsaber["computacao"].values())
         tot_comm = sum(item["latencia_comm"] for items in tsaber["comunicacao"].values() for item in items)

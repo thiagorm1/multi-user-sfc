@@ -347,8 +347,9 @@ class SubstrateNetworkController:
     def check_simulation_end(self, sfc_list: list[str]) -> bool:
         last_sf_mono = f"sfc_unique_p{self.players}_{self.flows}"
         last_sf_dec = f"sfc_mono_p{self.players}_{self.flows}"
+        last_sf_dag = f"sfc_dag_p{self.players}_{self.flows}"
         for sfc_id in sfc_list:
-            if sfc_id in (last_sf_mono, last_sf_dec):
+            if sfc_id in (last_sf_mono, last_sf_dec, last_sf_dag):
                 logger.info(f"[INFO] Last SFC released detected: {sfc_id}")
                 logger.info(f"Max queue size: {self.max_queue_size}")
                 time.sleep(1)
