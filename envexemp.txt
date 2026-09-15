@@ -1,0 +1,17 @@
+# Algoritmo: replic, darsppo, musfico, greedy, etc.
+MUAR_ALG=replic
+
+# Topologia: luxembourgv2, paloalto, nsfnet, etc.
+MUAR_TOPOLOGY=luxembourgv2
+
+# Sessões e Jogadores
+MUAR_N_SESSIONS=50
+MUAR_N_PLAYERS=4
+
+# Mobilidade (True requer Eclipse SUMO instalado no sistema; False roda sem SUMO)
+MUAR_MOBILITY=false
+
+# Tolerância a falhas e backup
+MUAR_BACKUP=true
+MUAR_AVA=0.99
+MUAR_NUMBER_OF_FAILS=3
