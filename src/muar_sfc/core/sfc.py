@@ -1,6 +1,5 @@
+import networkx as nx
 from muar_sfc.core.vnf import VNF
-
-# import networkx as nx
 
 
 class SFC:
@@ -13,6 +12,9 @@ class SFC:
         self.dst_node = None
         self.closer_router = None
 
+        self.graph = nx.DiGraph()  # Grafo direcionado nativo da SFC (DAG)
+        self.sync_tolerance = 5.0  # Tolerância máxima de sincronização inter-modal (ms)
+
         self.link_bandwidth_dict = {}
         self.latency_request = 0
         self.id = None
@@ -20,6 +22,10 @@ class SFC:
         self.duration = 0
         self.arrival_time = 0
         self.depart_time = 0
+
+        # Adiciona nós base ao grafo interno
+        self.graph.add_node(self.src.id, vnf=self.src)
+        self.graph.add_node(self.dst.id, vnf=self.dst)
 
     def __str__(self):
         attrs = vars(self)
@@ -31,31 +37,30 @@ class SFC:
     def add_vnf(self, vnf):
         self.vnfs[vnf.id] = vnf
         self.number_of_vnfs += 1
-
-    def remove_vnf(self, vnf):
-        print("Remove vnf has not be realized! Exit")
-        exit(1)
+        self.graph.add_node(vnf.id, vnf=vnf)
 
     def set_src_substrate_node(self, substrate_node):
-        """set substrate node for src
-
-        This method assign a substrate node for hosting src in sfc.
-        """
-        # todo(xu): we need consider whether this method should in sfc class
         self.src.assign_substrate_node(substrate_node)
 
     def set_dst_substrate_node(self, substrate_node):
-        """set substrate node for dst
-
-        This method assign a substrate node for hosting src in sfc.
-        """
-        # todo(xu): we need consider whether this method should in sfc class
         self.dst_node = substrate_node
         self.dst.assign_substrate_node(substrate_node)
 
+    def is_dag(self) -> bool:
+        """Verifica se a SFC forma um Grafo Acíclico Dirigido (DAG)."""
+        return nx.is_directed_acyclic_graph(self.graph)
+
+    def add_dependency(self, vnf1, vnf2, bandwidth=None):
+        """Conecta duas VNFs em arco direcionado vnf1 -> vnf2 no DAG."""
+        if bandwidth is None:
+            bandwidth = vnf1.get_outcome_interface_bandwidth() or 0
+        self.graph.add_edge(vnf1.id, vnf2.id, bandwidth=bandwidth)
+        vnf1.add_next_vnf(vnf2)
+        vnf2.add_previous_vnf(vnf1)
+        self.link_bandwidth_dict[(vnf1.id, vnf2.id)] = bandwidth
+
     def connect_two_vnfs(self, vnf1, vnf2):
-        vnf1.set_next_vnf(vnf2)
-        vnf2.set_previous_vnf(vnf1)
+        self.add_dependency(vnf1, vnf2)
 
     def change_link_bandwidth_request_to(self, vnf_id, bw):
         vnf = self.get_vnf_by_id(vnf_id)
@@ -138,15 +143,53 @@ class SFC:
             self.link_bandwidth_dict[(vnf.id, next_vnf.id)] = link_bw
             vnf = next_vnf
 
-    # def start(self):
-    #     import thread
-    #     print "sfc: " + str(self.id) + " START!"
-    #     self.t = thread.start_new_thread(self.update, ())
-    #
-    # def stop(self):
-    #     if self.t:
-    #         print "sfc: " + str(self.id) + " STOP!"
-    #         self.t.exit()
+    def get_all_paths(self) -> list[list[str]]:
+        """Retorna todos os caminhos direcionados de src até dst no DAG."""
+        if self.src.id in self.graph and self.dst.id in self.graph:
+            return list(nx.all_simple_paths(self.graph, source=self.src.id, target=self.dst.id))
+        return []
+
+    def get_critical_path_latency(self, path_latencies: dict[tuple[str, str], float], comp_latencies: dict[str, float]) -> float:
+        """
+        Calcula a latência ponta a ponta pelo caminho mais longo (caminho crítico do DAG):
+        T^{e2e} = max_{p in paths(src -> dst)} sum_{u -> v in p} (lat_comm(u, v) + lat_comp(v))
+        """
+        paths = self.get_all_paths()
+        if not paths:
+            # Fallback para soma simples se não houver caminhos no grafo
+            return sum(comp_latencies.values()) + sum(path_latencies.values())
+
+        max_latency = 0.0
+        for path in paths:
+            path_lat = 0.0
+            for i in range(len(path) - 1):
+                u, v = path[i], path[i + 1]
+                path_lat += path_latencies.get((u, v), 0.0)
+                path_lat += comp_latencies.get(v, 0.0)
+            max_latency = max(max_latency, path_lat)
+
+        return max_latency
+
+    def get_sync_differential(
+        self,
+        branch_a_vnfs: list[str],
+        branch_b_vnfs: list[str],
+        path_latencies: dict[tuple[str, str], float],
+        comp_latencies: dict[str, float],
+    ) -> float:
+        """
+        Calcula o diferencial de sincronização inter-modal delta_sync:
+        delta_sync = | Latencia(Ramo A) - Latencia(Ramo B) |
+        """
+        lat_a = sum(comp_latencies.get(v, 0.0) for v in branch_a_vnfs)
+        lat_b = sum(comp_latencies.get(v, 0.0) for v in branch_b_vnfs)
+        for (u, v), lat in path_latencies.items():
+            if u in branch_a_vnfs or v in branch_a_vnfs:
+                lat_a += lat
+            if u in branch_b_vnfs or v in branch_b_vnfs:
+                lat_b += lat
+
+        return abs(lat_a - lat_b)
 
 
 if __name__ == "__main__":

@@ -22,15 +22,42 @@ class VNF:
         self.cpu_request = None
         self.cache_request = None
         self.interfaces = {}
-        self.previous_vnf = (
-            None  # todo: VNF should not keep the information of previous and next vnf.
-        )
-        # todo: Previous and next vnf part should move to SFC and managed by SFC.
-        self.next_vnf = None
+        self.previous_vnfs = []
+        self.next_vnfs = []
         self.substrate_node = None
         self._attach_interfaces()
         self.type = None
         self.referenced_sf = None
+
+    @property
+    def previous_vnf(self):
+        return self.previous_vnfs[0] if self.previous_vnfs else None
+
+    @previous_vnf.setter
+    def previous_vnf(self, vnf):
+        if vnf is None:
+            self.previous_vnfs = []
+        elif vnf not in self.previous_vnfs:
+            self.previous_vnfs = [vnf]
+
+    @property
+    def next_vnf(self):
+        return self.next_vnfs[0] if self.next_vnfs else None
+
+    @next_vnf.setter
+    def next_vnf(self, vnf):
+        if vnf is None:
+            self.next_vnfs = []
+        elif vnf not in self.next_vnfs:
+            self.next_vnfs = [vnf]
+
+    def add_previous_vnf(self, vnf):
+        if vnf and vnf not in self.previous_vnfs:
+            self.previous_vnfs.append(vnf)
+
+    def add_next_vnf(self, vnf):
+        if vnf and vnf not in self.next_vnfs:
+            self.next_vnfs.append(vnf)
 
     def __hash__(self):
         return hash(str(self))

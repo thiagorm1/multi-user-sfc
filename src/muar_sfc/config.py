@@ -40,6 +40,8 @@ class SimulationSettings(BaseSettings):
     # --- Parâmetros SFC ---
     allow_md_host: bool = True
     sfc: bool = True
+    dag: bool = False
+    sync_tolerance: float = 5.0  # Janela máxima de sincronização inter-modal (ms)
     share: bool = True
     shareband: bool = False
     allow_delay: bool = False
