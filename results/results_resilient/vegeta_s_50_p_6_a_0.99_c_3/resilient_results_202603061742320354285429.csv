@@ -1,0 +1,2 @@
+crash_trial,sfc_id,recover_success,backup_success,backup_efficient,latency_before,latency_after,latency_diff,time_to_recover,vnf_id,latency_degrad,resource_degrad,risk_level,final_status
+0,sfc_unique_p6_19,True,False,N/A,14.973067646959793,9.69,-5.283067646959793,0.03847146034240723,N/A,-5.283067646959793,-21.0,High,Slow Recover

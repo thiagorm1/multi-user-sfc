@@ -1,0 +1,3 @@
+# set python environment in Anaconda
+conda create --name mu-sfc --file spec-environment.txt
+conda activate mu-sfc

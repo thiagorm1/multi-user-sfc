@@ -1,0 +1,56 @@
+import networkx as nx
+
+# import matplotlib.pyplot as plt
+from muar_sfc.core.net import Net
+
+simple_six_node_topology = None
+
+
+def generate_substrate_network():
+    substrate_network = Net()
+    substrate_network.init_bandwidth_capacity(1, 6, 100)
+    substrate_network.init_bandwidth_capacity(1, 2, 100)
+    substrate_network.init_bandwidth_capacity(2, 3, 100)
+    substrate_network.init_bandwidth_capacity(3, 4, 100)
+    substrate_network.init_bandwidth_capacity(4, 5, 100)
+    substrate_network.init_bandwidth_capacity(5, 6, 100)
+    substrate_network.init_bandwidth_capacity(2, 6, 100)
+    # substrate_network.init_bandwidth_capacity(2, 5, 100)
+    substrate_network.init_bandwidth_capacity(3, 5, 100)
+
+    substrate_network.init_link_latency(1, 6, 2)
+    substrate_network.init_link_latency(1, 2, 1)
+    substrate_network.init_link_latency(2, 3, 4)
+    substrate_network.init_link_latency(3, 4, 30)
+    substrate_network.init_link_latency(4, 5, 2)
+    substrate_network.init_link_latency(5, 6, 2)
+    substrate_network.init_link_latency(2, 6, 5)
+    # substrate_network.init_link_latency(2, 5, 2)
+    substrate_network.init_link_latency(3, 5, 30)
+
+    substrate_network.init_node_cpu_capacity(1, 100)
+    substrate_network.init_node_cpu_capacity(2, 100)
+    substrate_network.init_node_cpu_capacity(3, 100)
+    substrate_network.init_node_cpu_capacity(4, 100)
+    substrate_network.init_node_cpu_capacity(5, 100)
+    substrate_network.init_node_cpu_capacity(6, 100)
+
+    substrate_network.init_node_cache_capacity(1, 100)
+    substrate_network.init_node_cache_capacity(2, 100)
+    substrate_network.init_node_cache_capacity(3, 100)
+    substrate_network.init_node_cache_capacity(4, 100)
+    substrate_network.init_node_cache_capacity(5, 100)
+    substrate_network.init_node_cache_capacity(6, 100)
+    substrate_network.pre_get_single_source_minimum_latency_path()
+    substrate_network.update()
+
+    return substrate_network
+
+
+simple_six_node_topology = generate_substrate_network()
+if __name__ == "__main__":
+    simple_six_node_topology = generate_substrate_network()
+    bc = nx.algorithms.centrality.betweenness_centrality_subset(
+        simple_six_node_topology, [1], [4], weight="latency"
+    )
+    print(bc)

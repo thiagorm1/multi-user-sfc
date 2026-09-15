@@ -1,0 +1,53 @@
+# ==========================================
+# .gitignore - Multi-User SFC Simulator
+# ==========================================
+
+# --- Ambientes Virtuais e Caches do Python ---
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- IDEs e Ferramentas Locais ---
+.vscode/
+.vs/
+.idea/
+.ipynb_checkpoints/
+*.suo
+slnx.sqlite
+PythonSettings.json
+
+# --- Artefatos Dinâmicos, Mídia e Arquivos Compactados ---
+*.rar
+*.zip
+*.tar.gz
+*.pdf
+*.mp4
+
+# --- Saídas do Simulador e Dados Locais ---
+logs/
+plots/
+results/
+rl_saved_models/
+variaveis_salvas/
+backup_log.txt
+
+# --- Arquivos Temporários de Teste / Scratchpads ---
+test.py
+teste.csv
+
+
+# --- Variáveis de Ambiente e Segredos (MUITO IMPORTANTE) ---
+.env
+.env.*
+!.env.example
+
+# --- Cobertura de Testes ---
+.coverage
+coverage.xml
+htmlcov/
+.tox/

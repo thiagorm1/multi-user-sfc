@@ -1,0 +1,44 @@
+crash_trial,sfc_id,recover_success,backup_success,backup_efficient,latency_before,latency_after,latency_diff,time_to_recover,vnf_id,latency_degrad,resource_degrad,risk_level,final_status
+0,sfc_unique_p6_14,True,False,N/A,4.34423505170414,2.13,-2.21423505170414,0.03659319877624512,N/A,-2.21423505170414,-21.0,High,Slow Recover
+0,sfc_unique_p5_14,True,False,N/A,3.778456172199878,3.8,0.02154382780012165,0.07219409942626953,N/A,0.02154382780012165,-21.0,High,Slow Recover
+0,sfc_unique_p4_15,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_unique_p3_15,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p6_17,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p6_13,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p4_14,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p3_19,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p3_14,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p3_13,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p2_14,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p1_20,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+0,sfc_cache_p1_14,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p6_23,True,False,N/A,2.6400310843039843,2.4,-0.24003108430398434,0.06494736671447754,N/A,-0.24003108430398434,-10.0,High,Slow Recover
+1,sfc_cache_p6_22,True,False,N/A,2.674631094801054,2.4,-0.27463109480105397,0.13277935981750488,N/A,-0.27463109480105397,-10.0,High,Slow Recover
+1,sfc_cache_p5_23,True,False,N/A,2.6400310843039843,2.98,0.3399689156960157,0.19887185096740723,N/A,0.3399689156960157,-10.0,High,Slow Recover
+1,sfc_cache_p5_22,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p4_23,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p4_22,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p3_24,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p3_23,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p3_22,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p2_23,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p2_22,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p1_24,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p1_23,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+1,sfc_cache_p1_22,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_unique_p1_30,True,False,N/A,1.4231805137981743,1.48,0.05681948620182564,0.05735611915588379,N/A,0.05681948620182564,-21.0,High,Slow Recover
+2,sfc_cache_p6_31,True,False,N/A,2.85665944866017,2.01,-0.8466594486601702,0.11235666275024414,N/A,-0.8466594486601702,-10.0,High,Slow Recover
+2,sfc_cache_p6_30,True,False,N/A,3.0554203284956816,2.81,-0.24542032849568152,0.18419456481933594,N/A,-0.24542032849568152,-10.0,High,Slow Recover
+2,sfc_cache_p5_31,True,False,N/A,2.85665944866017,2.34,-0.5166594486601701,0.2529411315917969,N/A,-0.5166594486601701,-10.0,High,Slow Recover
+2,sfc_cache_p5_29,True,False,N/A,2.932076698846612,3.17,0.2379233011533879,0.3220558166503906,N/A,0.2379233011533879,-5.67,High,Slow Recover
+2,sfc_cache_p4_32,True,False,N/A,4.528325897450178,3.77,-0.7583258974501779,0.3952314853668213,N/A,-0.7583258974501779,-10.0,High,Slow Recover
+2,sfc_cache_p4_31,True,False,N/A,2.85665944866017,3.31,0.4533405513398301,0.5764610767364502,N/A,0.4533405513398301,-10.0,High,Slow Recover
+2,sfc_cache_p3_33,True,False,N/A,3.310575254794343,4.75,1.439424745205657,0.627854585647583,N/A,1.439424745205657,-10.0,High,Slow Recover
+2,sfc_cache_p3_32,True,False,N/A,4.953889334526695,5.44,0.48611066547330495,0.6802928447723389,N/A,0.48611066547330495,-5.67,High,Slow Recover
+2,sfc_cache_p3_31,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p3_30,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p3_28,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p2_32,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p2_31,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p2_30,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed
+2,sfc_cache_p1_31,False,False,N/A,0.0,0.0,0.0,0.0,N/A,0.0,0.0,High,Failed

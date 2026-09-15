@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muar-sfc"
+version = "1.0.0"
+description = "Simulador de Immersive Services e SFC"
+authors = [
+    { name = "Hugo Leonardo", email = "hugosantos@ufpa.br" }
+]
+# Fixado para o Python 3.12, base do seu ambiente atual
+requires-python = ">=3.12"
+dependencies = [
+    "stable-baselines3",
+    "pandas",
+    "matplotlib",
+    "numpy",
+    "simpy",
+    "sumo", 
+    "scipy",
+    "shapely",
+    "deap",
+    "tensorboard",
+    "seaborn",
+    "pytz",
+    "sb3-contrib>=2.7.1",
+    "traci>=1.26.0",
+    "pydantic-settings>=2.13.1",
+    "loguru",
+]
+
+# --- NOVA SEÇÃO: PONTOS DE ENTRADA DO SISTEMA (CLI) ---
+[project.scripts]
+muar-sim = "muar_sfc.main:main"
+muar-sim-paralelo = "muar_sfc.parallel_runner:main"
+muar-sim-seq = "muar_sfc.sequential_runner:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/muar_sfc"]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "nbformat",
+    "pytest>=7.0",
+    "ruff>=0.15.5",
+]
+
+[tool.ruff]
+extend-exclude = ["*.ipynb"]
+line-length = 99
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (ordenação de imports)
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade 
+    "SIM", # flake8-simplify
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src"]
+exclude = [
+    "**/__pycache__", 
+    ".venv", 
+    ".ruff_cache",
+    ".git",
+    "tests"
+]
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
