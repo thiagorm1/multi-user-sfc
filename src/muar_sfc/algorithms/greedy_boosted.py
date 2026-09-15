@@ -119,31 +119,21 @@ class GreedyOptAlgorithm(Algorithm):
             or not self.route_info
         ):
             return False
+
+        if getattr(self.sfc, "is_dag", lambda: False)():
+            return len(list(self.route_info.keys())) >= 5
+
         return len(list(self.route_info.keys())) == 6
 
     def handle_failure(self):
         self.route_info = False
         self.latency = None
 
-        # for vnf, server_forbidden in self.forbidden_matches.items():
-        #     try:
-        #         server_used = self.route_info[vnf][0]
-        #         if server_used == server_forbidden:
-        #             self.route_info = False
-        #             self.latency = None
-        #             return False
-        #     except:
-        #         self.route_info = False
-        #         self.latency = None
-        #         return False
-
     def start_algorithm(self):
-        # logger.info("Start algorithm")
         self.algorithm()
         is_success = self.check_solution()
         if is_success:
             try:
-                # logger.info("Finished algorithm, success")
                 logger.debug(f"Route info greedyB: {self.route_info}")
                 return True
             except Exception as e:
@@ -152,7 +142,6 @@ class GreedyOptAlgorithm(Algorithm):
                 return False
         else:
             self.handle_failure()
-            # logger.info("End algorithm, failed")
             return False
 
     def get_latency(self):
@@ -162,6 +151,9 @@ class GreedyOptAlgorithm(Algorithm):
         return self.route_info
 
     def algorithm(self):
+        if getattr(self.sfc, "is_dag", lambda: False)():
+            return self._solve_dag_greedy()
+
         # Get src and dst vnf
         src_vnf = self.sfc.get_src_vnf()
         dst_vnf = self.sfc.get_dst_vnf()
@@ -315,3 +307,162 @@ class GreedyOptAlgorithm(Algorithm):
         for i in range(len(path) - 1):
             edge_latency = get_link_latency(self.graph, path[i], path[i + 1])
             self.latency = self.latency - edge_latency
+
+    def _solve_dag_greedy(self) -> bool:
+        """
+        Alocação gulosa orientada a latência e recursos para SFC em DAG:
+        - IA_DET_FT alocado no servidor ótimo mais próximo de src
+        - MA e UNI alocados em paralelo nos melhores servidores com recursos livres
+        - RE alocado balanceando a latência dos dois ramos (|lat_ma - lat_uni| <= sync_tol)
+        - EC_TC alocado minimizando a entrega em dst
+        """
+        sfc = self.sfc
+        src_vnf = sfc.get_src_vnf()
+        dst_vnf = sfc.get_dst_vnf()
+        src_node = sfc.get_substrate_node(src_vnf)
+        dst_node = sfc.get_substrate_node(dst_vnf)
+
+        sync_tol = getattr(sfc, "sync_tolerance", 5.0)
+
+        ia_vnf = None
+        ma_vnf = None
+        uni_vnf = None
+        re_vnf = None
+        ec_tc_vnf = None
+
+        for v_id, v_obj in sfc.vnfs.items():
+            if v_id.startswith("IA_DET_FT"): ia_vnf = v_obj
+            elif v_id.startswith("MA_region"): ma_vnf = v_obj
+            elif v_id.startswith("UNI_"): uni_vnf = v_obj
+            elif v_id.startswith("RE_"): re_vnf = v_obj
+            elif v_id.startswith("EC_TC_"): ec_tc_vnf = v_obj
+
+        if not (ia_vnf and ma_vnf and uni_vnf and re_vnf and ec_tc_vnf):
+            self.route_info = {}
+            self.latency = None
+            return False
+
+        def get_candidates(vnf, req_cpu, req_cache=0.0):
+            cands = []
+            for n, d in self.graph.nodes(data=True):
+                if d.get("type") not in ("server", "mobile_device"):
+                    continue
+                if n in (src_node, dst_node):
+                    continue
+                c_free = d.get("cpu_capacity", 0.0) - d.get("cpu_used", 0.0)
+                ca_free = d.get("cache_capacity", 0.0) - d.get("cache_used", 0.0)
+                if c_free >= req_cpu and ca_free >= req_cache:
+                    cands.append(n)
+            return cands
+
+        def get_path(u, v):
+            try:
+                return nx.shortest_path(self.graph, source=u, target=v, weight="latency")
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                return []
+
+        def path_latency(p):
+            if not p or len(p) < 2:
+                return 0.0
+            lat = 0.0
+            for i in range(len(p) - 1):
+                lat += self.graph.edges[p[i], p[i + 1]].get("latency", 1.0)
+            return lat
+
+        ia_cands = get_candidates(ia_vnf, ia_vnf.get_cpu_request(), ia_vnf.get_cache_request())
+        if not ia_cands:
+            self.route_info = {}
+            self.latency = None
+            return False
+
+        ia_node = min(ia_cands, key=lambda n: path_latency(get_path(src_node, n)))
+        path_src_ia = get_path(src_node, ia_node)
+
+        ma_cands = get_candidates(ma_vnf, ma_vnf.get_cpu_request(), ma_vnf.get_cache_request())
+        uni_cands = get_candidates(uni_vnf, uni_vnf.get_cpu_request(), uni_vnf.get_cache_request())
+        re_cands = get_candidates(re_vnf, re_vnf.get_cpu_request(), re_vnf.get_cache_request())
+        ec_cands = get_candidates(ec_tc_vnf, ec_tc_vnf.get_cpu_request(), ec_tc_vnf.get_cache_request())
+
+        if not (ma_cands and uni_cands and re_cands and ec_cands):
+            self.route_info = {}
+            self.latency = None
+            return False
+
+        # Guloso: Escolhe o nó MA mais próximo de IA
+        ma_node = min(ma_cands, key=lambda n: path_latency(get_path(ia_node, n)))
+        path_ia_ma = get_path(ia_node, ma_node)
+
+        # Guloso: Escolhe o nó UNI mais próximo de IA
+        uni_node = min(uni_cands, key=lambda n: path_latency(get_path(ia_node, n)))
+        path_ia_uni = get_path(ia_node, uni_node)
+
+        comp_ma = calculate_computational_latency(self.graph, ma_node, ma_vnf)
+        comp_uni = calculate_computational_latency(self.graph, uni_node, uni_vnf)
+
+        # Guloso: Escolhe o melhor nó RE que minimize a divergência de sincronização
+        best_re = None
+        best_crit = float("inf")
+        best_delta = float("inf")
+        best_paths = None
+
+        for cand_re in re_cands:
+            p_ma_re = get_path(ma_node, cand_re)
+            p_uni_re = get_path(uni_node, cand_re)
+            if not (p_ma_re and p_uni_re):
+                continue
+
+            lat_m = path_latency(path_ia_ma) + comp_ma + path_latency(p_ma_re)
+            lat_u = path_latency(path_ia_uni) + comp_uni + path_latency(p_uni_re)
+            delta = abs(lat_m - lat_u)
+            crit = max(lat_m, lat_u)
+
+            if delta <= sync_tol:
+                if crit < best_crit:
+                    best_crit = crit
+                    best_delta = delta
+                    best_re = cand_re
+                    best_paths = (p_ma_re, p_uni_re)
+
+        if best_re is None:
+            for cand_re in re_cands:
+                p_ma_re = get_path(ma_node, cand_re)
+                p_uni_re = get_path(uni_node, cand_re)
+                if p_ma_re and p_uni_re:
+                    lat_m = path_latency(path_ia_ma) + comp_ma + path_latency(p_ma_re)
+                    lat_u = path_latency(path_ia_uni) + comp_uni + path_latency(p_uni_re)
+                    delta = abs(lat_m - lat_u)
+                    if delta < best_delta:
+                        best_delta = delta
+                        best_crit = max(lat_m, lat_u)
+                        best_re = cand_re
+                        best_paths = (p_ma_re, p_uni_re)
+
+        if best_re is None or best_delta > sync_tol * 2:
+            self.route_info = {}
+            self.latency = None
+            return False
+
+        re_node = best_re
+        path_ma_re, path_uni_re = best_paths
+
+        # Guloso: Escolhe o melhor nó EC_TC até dst
+        ec_node = min(ec_cands, key=lambda n: path_latency(get_path(re_node, n)) + path_latency(get_path(n, dst_node)))
+        path_re_ec = get_path(re_node, ec_node)
+        path_ec_dst = get_path(ec_node, dst_node)
+
+        self.route_info = {
+            "src": path_src_ia if path_src_ia else [src_node],
+            ia_vnf.id: [ia_node],
+            ma_vnf.id: list(reversed(path_ia_ma)) if path_ia_ma else [ma_node],
+            uni_vnf.id: list(reversed(path_ia_uni)) if path_ia_uni else [uni_node],
+            re_vnf.id: list(reversed(path_ma_re)) if path_ma_re else [re_node],
+            ec_tc_vnf.id: list(reversed(path_re_ec)) if path_re_ec else [ec_node],
+            "dst": path_ec_dst if path_ec_dst else [dst_node],
+        }
+
+        comp_ia = calculate_computational_latency(self.graph, ia_node, ia_vnf)
+        comp_re = calculate_computational_latency(self.graph, re_node, re_vnf)
+        comp_ec = calculate_computational_latency(self.graph, ec_node, ec_tc_vnf)
+
+        self.latency = round(comp_ia + best_crit + comp_re + path_latency(path_re_ec) + comp_ec + path_latency(path_ec_dst), 2)
+        return True
