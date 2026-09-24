@@ -49,6 +49,12 @@ class SimulationSettings(BaseSettings):
     shareband: bool = False
     allow_delay: bool = False
 
+    # --- Parâmetros do Orquestrador Cognitivo (Cloud LLM Planner) ---
+    cognitive_planner: bool = False
+    cognitive_planner_interval: float = 30.0
+    cognitive_llm_model: str = "mock"
+    cognitive_api_key: str = ""
+
     # --- Parâmetros de Confiabilidade e Falhas ---
     backup: bool = True
     ava: float = 0.99

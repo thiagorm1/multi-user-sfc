@@ -33,6 +33,8 @@ def create_output_dir(args, topology) -> tuple[dict[str, Path], Path, Path, Path
     alg_name = args.alg.replace("_", "")
     if getattr(args, "dag", False) and "dag" not in alg_name:
         alg_name = f"{alg_name}dag"
+    if getattr(args, "cognitive_planner", False) and "cog" not in alg_name:
+        alg_name = f"{alg_name}cog"
     availability = args.ava
 
     number_of_fails = args.number_of_fails

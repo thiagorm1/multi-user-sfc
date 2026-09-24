@@ -33,6 +33,7 @@ class SubstrateNetworkController:
         energy_calculator: EnergyCalculator | None = None,
         backup_manager: BackupManager | None = None,
         mobility_manager: MobilityManager | None = None,
+        cognitive_planner: Any | None = None,
         players: int = 6,
         flows: int = 0,
         sfc_name: bool = True,
@@ -46,6 +47,7 @@ class SubstrateNetworkController:
         self.output_writter = output_writter
         self.backup_manager = backup_manager
         self.mobility_manager = mobility_manager
+        self.cognitive_planner = cognitive_planner
         self.energy_calculator = energy_calculator or EnergyCalculator()
 
         self.alg = alg
@@ -125,6 +127,7 @@ class SubstrateNetworkController:
         self.initialize_timers()
         while not self.is_stopped:
             self.handle_resources_cleanup()
+            self.handle_cognitive_planning()
             self.handle_mobility()
             self.handle_backups()
             self.handle_fails()
@@ -136,6 +139,11 @@ class SubstrateNetworkController:
             self.iteration_counter += 1
             if not processed_sfcs:
                 time.sleep(0.01)
+
+    def handle_cognitive_planning(self) -> None:
+        if self.cognitive_planner and getattr(self.cognitive_planner, "activated", False):
+            current_time = time.time()
+            self.cognitive_planner.step_planning(current_time, algorithm=self.alg)
 
     def handle_mobility(self) -> None:
         if self.mobility_manager and self.mobility_manager.activated:

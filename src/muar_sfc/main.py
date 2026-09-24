@@ -94,6 +94,16 @@ def setup_controller(
     fail_manager = Crasher(topology=topology, args=settings)
     mobility_manager = MobilityManager(settings)
     
+    cognitive_planner = None
+    if getattr(settings, "cognitive_planner", False):
+        from muar_sfc.controllers.cloud_llm_planner import CloudLLMPlanner
+
+        cognitive_planner = CloudLLMPlanner(
+            settings=settings,
+            substrate_network=network,
+            algorithm=alg,
+        )
+
     # Pathlib já deve estar sendo embutido implicitamente no create_output_dir
     output_writter = OutputWritter(topology, *create_output_dir(settings, topology))
 
@@ -105,6 +115,7 @@ def setup_controller(
         fail_manager=fail_manager,
         backup_manager=backup_manager,
         mobility_manager=mobility_manager,
+        cognitive_planner=cognitive_planner,
         output_writter=output_writter,
         failure_schedule=full_failure_schedule,
         alg=alg,
