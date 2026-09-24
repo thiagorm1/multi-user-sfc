@@ -36,12 +36,15 @@ class SimulationSettings(BaseSettings):
     # --- Parâmetros de Entrada Obrigatórios e Tráfego ---
     n_sessions: int = 50
     n_players: int = 4
+    official_rate: float = 20.0
 
     # --- Parâmetros SFC ---
     allow_md_host: bool = True
     sfc: bool = True
     dag: bool = False
     sync_tolerance: float = 5.0  # Janela máxima de sincronização inter-modal (ms)
+    n_mappo_regions: int = 4     # Número de regiões/clusters de borda para o MAPPO
+    mappo_model_path: str = ""   # Caminho customizado para os pesos do MAPPO
     share: bool = True
     shareband: bool = False
     allow_delay: bool = False

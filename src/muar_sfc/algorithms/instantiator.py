@@ -10,6 +10,7 @@ from muar_sfc.algorithms.greedy_boosted import GreedyOptAlgorithm
 from muar_sfc.algorithms.hephaestus import hephaestus
 from muar_sfc.algorithms.k_shortest_paths_algorithm import KShortestPathsAlgorithm
 from muar_sfc.algorithms.kuririn import Kuririn
+from muar_sfc.algorithms.mappo import MAPPOAlgorithm
 from muar_sfc.algorithms.msf import MSF
 from muar_sfc.algorithms.musfico import Musfico
 from muar_sfc.algorithms.new_alg import NewAlg
@@ -24,6 +25,8 @@ class AlgorithmInstantiator:
     def instantiate_algorithm(self, type):
         if type in ("dag_greedy", "dag"):
             alg = DAGGreedyAlgorithm()
+        elif type in ("mappo", "MAPPO"):
+            alg = MAPPOAlgorithm()
         elif type == "musfico":
             alg = Musfico()
         elif type == "new_alg":

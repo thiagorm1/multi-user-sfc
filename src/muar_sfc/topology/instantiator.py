@@ -20,6 +20,9 @@ class TopologyInstantiator:
     def instantiate_topology(self, type, eco_effi_ratio):
         try:
             topology_class = self.topology_classes[type]
-            return topology_class(eco_effi_ratio)
+            try:
+                return topology_class(eco_effi_ratio)
+            except TypeError:
+                return topology_class()
         except KeyError as e:
             raise ValueError(f"Topology '{type}' not found") from e

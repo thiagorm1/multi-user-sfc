@@ -529,6 +529,8 @@ class SFCInstatiator:
                         alg_success = algorithm.start_algorithm(self.env)
                 else:
                     logger.error(f"Tentativa de usar {algorithm.name} sem um ambiente inicializado.")
+            elif type(algorithm).__name__ == "MAPPOAlgorithm":
+                alg_success = algorithm.start_algorithm(args=self.args)
             else:
                 alg_success = algorithm.start_algorithm()
 
