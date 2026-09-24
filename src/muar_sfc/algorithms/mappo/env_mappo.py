@@ -205,7 +205,7 @@ class MAPPO_SFC_Env:
             # mascara-os desde que reste ao menos 1 candidato viável (local ou nuvem).
             if avoid_nodes:
                 for idx, node in enumerate(nodes):
-                    if node in avoid_nodes and mask[idx] == 1.0 and mask.sum() > 2:
+                    if node in avoid_nodes and mask[idx] == 1.0 and mask.sum() > 1:
                         mask[idx] = 0.0
 
             # Se todos os nós locais forem inválidos, a nuvem absorve
@@ -366,7 +366,18 @@ class MAPPO_SFC_Env:
             ) if path else 0.0
 
             step_lat = comp_lat + comm_lat
-            cost = step_lat + (data.get("cpu_used", 0.0) / max(1.0, data.get("cpu_capacity", 1.0)))
+
+            w_lat = 0.5
+            w_lb = 0.5
+            if self.cognitive_guidance is not None:
+                w_lat = float(getattr(self.cognitive_guidance, "latency_weight", 0.5))
+                w_lb = float(getattr(self.cognitive_guidance, "load_balance_weight", 0.5))
+
+            cpu_util = data.get("cpu_used", 0.0) / max(1.0, data.get("cpu_capacity", 1.0))
+            avoid_nodes_list = getattr(self.cognitive_guidance, "avoid_nodes", []) or []
+            avoid_penalty = 50.0 if (cand in avoid_nodes_list) else 0.0
+
+            cost = (w_lat * step_lat) + (w_lb * cpu_util * 25.0) + avoid_penalty
 
             if cost < best_cost:
                 best_cost = cost

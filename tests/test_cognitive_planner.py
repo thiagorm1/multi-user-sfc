@@ -122,7 +122,7 @@ def test_action_mask_pruning(sample_network, sample_sfc):
         if 1 in nodes_in_r:
             idx = nodes_in_r.index(1)
             # Se havia alternativas, o índice foi mascarado
-            if masks_before[r].sum() > 2:
+            if masks_before[r].sum() > 1:
                 assert masks_after[r][idx] == 0.0
 
 

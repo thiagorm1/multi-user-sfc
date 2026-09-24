@@ -51,7 +51,7 @@ class SimulationSettings(BaseSettings):
 
     # --- Parâmetros do Orquestrador Cognitivo (Cloud LLM Planner) ---
     cognitive_planner: bool = False
-    cognitive_planner_interval: float = 30.0
+    cognitive_planner_interval: float = 2.0
     cognitive_llm_model: str = "mock"
     cognitive_api_key: str = ""
 

@@ -12,11 +12,11 @@ class CognitiveGuidance(BaseModel):
     São enviadas assincronamente aos controladores locais e agentes MAPPO.
     """
 
-    avoid_nodes: list[int | str] = Field(
+    avoid_nodes: list[int | str | float] = Field(
         default_factory=list,
         description="Nós que estão saturados ou com alto risco de gargalo e devem ser evitados.",
     )
-    priority_cache_nodes: list[int | str] = Field(
+    priority_cache_nodes: list[int | str | float] = Field(
         default_factory=list,
         description="Nós recomendados para hospedar funções de cache/agregação (ex: MA_region).",
     )
@@ -121,15 +121,15 @@ class CloudLLMPlanner:
             }
             nodes_telemetry.append(info)
 
-            # Identifica nós com saturação crítica de processamento
-            if cpu_util >= 0.65:
+            # Identifica nós com saturação crítica/proativa de processamento
+            if cpu_util >= 0.50:
                 high_cpu_nodes.append(node_id)
 
             # Identifica nós de borda aptos a hospedar cache regional
             is_edge = (node_type == "server_edge") or (
                 node_type == "server" and level_server != "cloud"
             )
-            if is_edge and cache_free >= 150.0 and cpu_util < 0.60:
+            if is_edge and cache_free >= 150.0 and cpu_util < 0.50:
                 cache_ready_nodes.append(node_id)
 
         net_cpu_pct = (total_cpu_used / total_cpu_cap * 100) if total_cpu_cap > 0 else 0.0
@@ -152,23 +152,26 @@ class CloudLLMPlanner:
         net_cpu_pct = telemetry.get("net_cpu_util_pct", 0.0)
 
         # Regras de Meta-Política Dinâmica
-        if net_cpu_pct > 35.0:
-            # Sob alta saturação: prioriza aceitação e balanceamento de carga
-            lat_w = 0.35
-            load_w = 0.65
-            sync_factor = 1.2
-            strategy = "Alta carga detectada. Priorizando balanceamento e admissão."
-        elif net_cpu_pct > 15.0:
+        if high_cpu_nodes or net_cpu_pct > 25.0:
+            # Sob saturação local ou global: prioriza balanceamento de carga e admissão
+            lat_w = 0.25
+            load_w = 0.75
+            sync_factor = 1.15
+            strategy = (
+                f"Saturação detectada em {len(high_cpu_nodes)} nós. "
+                "Priorizando balanceamento de carga e transbordo para nós vizinhos."
+            )
+        elif net_cpu_pct > 10.0:
             # Carga moderada: equilíbrio estrito
-            lat_w = 0.55
-            load_w = 0.45
+            lat_w = 0.45
+            load_w = 0.55
             sync_factor = 1.0
             strategy = "Carga moderada. Operação balanceada entre latência e recursos."
         else:
             # Baixa carga: foca em ultra-baixa latência e colocação hiper-local
-            lat_w = 0.80
-            load_w = 0.20
-            sync_factor = 0.9
+            lat_w = 0.75
+            load_w = 0.25
+            sync_factor = 0.95
             strategy = "Rede desafogada. Maximizando proximidade e ultra-baixa latência."
 
         reasoning = (
