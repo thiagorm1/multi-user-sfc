@@ -41,6 +41,13 @@ class MAPPOAlgorithm(Algorithm):
         self.trainer: MAPPOTrainer | None = None
         self.env: MAPPO_SFC_Env | None = None
         self.sync_differential: float = 0.0
+        self.cognitive_guidance: Any = None
+
+    def update_cognitive_guidance(self, guidance: Any) -> None:
+        """Recebe e propaga as diretrizes de alto nível do CloudLLMPlanner."""
+        self.cognitive_guidance = guidance
+        if self.env is not None:
+            self.env.set_cognitive_guidance(guidance)
 
     def clear_all(self):
         """Limpa o estado da simulação."""
@@ -138,6 +145,10 @@ class MAPPOAlgorithm(Algorithm):
             return False
 
         sync_tol = getattr(self.sfc, "sync_tolerance", 5.0)
+        if self.cognitive_guidance:
+            factor = getattr(self.cognitive_guidance, "sync_tolerance_factor", 1.0)
+            sync_tol *= factor
+
         self.env = MAPPO_SFC_Env(
             graph=self.graph,
             sfc=self.sfc,
@@ -145,6 +156,7 @@ class MAPPOAlgorithm(Algorithm):
             cloud_node=self.cloud_node,
             sync_tolerance=sync_tol,
             is_training=False,
+            cognitive_guidance=self.cognitive_guidance,
         )
 
         self._ensure_trainer_initialized(self.env)

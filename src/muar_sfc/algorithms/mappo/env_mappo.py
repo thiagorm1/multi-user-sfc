@@ -49,6 +49,7 @@ class MAPPO_SFC_Env:
         cloud_node: int | str = 0,
         sync_tolerance: float = 5.0,
         is_training: bool = False,
+        cognitive_guidance: Any = None,
     ):
         if isinstance(graph, nx.Graph):
             self.base_graph = graph
@@ -62,6 +63,7 @@ class MAPPO_SFC_Env:
         self.cloud_node = cloud_node
         self.sync_tolerance = sync_tolerance
         self.is_training = is_training
+        self.cognitive_guidance = cognitive_guidance
 
         self.partitioner = RegionalTopologyPartitioner(
             self.graph, n_regions=n_regions, cloud_node=cloud_node
@@ -150,10 +152,15 @@ class MAPPO_SFC_Env:
         # Linear fallback
         return [v for k, v in sfc.vnfs.items() if k not in ("src", "dst")]
 
+    def set_cognitive_guidance(self, guidance: Any) -> None:
+        """Atualiza dinamicamente as diretrizes cognitivas do CloudLLMPlanner."""
+        self.cognitive_guidance = guidance
+
     def get_action_masks(self) -> dict[int, np.ndarray]:
         """
         Gera máscara booleana/binária de ações válidas para cada agente k.
         1 se o nó tem capacidade de CPU/Cache para a VNF atual e link viável, 0 caso contrário.
+        Aplica Poda de Ações Cognitiva (Action Mask Pruning) baseada em avoid_nodes do LLM.
         """
         masks = {}
         if self.current_vnf_idx >= len(self.vnf_sequence):
@@ -165,6 +172,8 @@ class MAPPO_SFC_Env:
         cpu_req = curr_vnf.get_cpu_request()
         cache_req = curr_vnf.get_cache_request()
         bw_req = curr_vnf.get_outcome_interface_bandwidth()
+
+        avoid_nodes = set(getattr(self.cognitive_guidance, "avoid_nodes", []) or [])
 
         for r in range(self.n_regions):
             mask = np.zeros(self.action_dim_per_agent, dtype=np.float32)
@@ -190,6 +199,14 @@ class MAPPO_SFC_Env:
             # Ação de Nuvem (sempre válida como fallback seguro de capacidade)
             cloud_idx = self.max_nodes_per_region
             mask[cloud_idx] = 1.0
+
+            # Poda Cognitiva de Ação (Action Mask Pruning via LLM Guidance):
+            # Se nós da região foram marcados como congestionados no avoid_nodes,
+            # mascara-os desde que reste ao menos 1 candidato viável (local ou nuvem).
+            if avoid_nodes:
+                for idx, node in enumerate(nodes):
+                    if node in avoid_nodes and mask[idx] == 1.0 and mask.sum() > 2:
+                        mask[idx] = 0.0
 
             # Se todos os nós locais forem inválidos, a nuvem absorve
             if mask.sum() == 0:
@@ -420,11 +437,28 @@ class MAPPO_SFC_Env:
         lb_t = float(np.std(cpu_utils)) if cpu_utils else 0.0
         avg_cpu = float(np.mean(cpu_utils)) if cpu_utils else 0.0
 
-        r_lat = self.w_latency * (self.total_latency / self.lat_max)
+        w_lat = self.w_latency
+        w_lb = self.w_lb
+
+        # Dynamic Reward Shaping guiado pela Meta-Política do LLM Planner:
+        if self.cognitive_guidance is not None:
+            lat_w = float(getattr(self.cognitive_guidance, "latency_weight", 0.5))
+            load_w = float(getattr(self.cognitive_guidance, "load_balance_weight", 0.5))
+            w_lat = self.w_latency * (lat_w / 0.5)
+            w_lb = self.w_lb * (load_w / 0.5)
+
+        r_lat = w_lat * (self.total_latency / self.lat_max)
         r_cpu = self.w_cpu * avg_cpu
-        r_lb = self.w_lb * lb_t
+        r_lb = w_lb * lb_t
 
         reward = -(r_lat + r_cpu + r_lb)
+
+        # Bônus cognitivo por alocação de cache nos nós recomendados
+        p_cache = getattr(self.cognitive_guidance, "priority_cache_nodes", None)
+        if p_cache:
+            for v_id, node in self.allocated_nodes.items():
+                if "MA" in str(v_id) and node in p_cache:
+                    reward += 3.0
 
         if done:
             # Penalidade de SLA de Latência Máxima
