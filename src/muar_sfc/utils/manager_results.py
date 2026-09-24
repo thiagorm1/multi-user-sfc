@@ -31,6 +31,8 @@ def create_output_dir(args, topology) -> tuple[dict[str, Path], Path, Path, Path
     edges = top_info["edges"]
 
     alg_name = args.alg.replace("_", "")
+    if getattr(args, "dag", False) and "dag" not in alg_name:
+        alg_name = f"{alg_name}dag"
     availability = args.ava
 
     number_of_fails = args.number_of_fails

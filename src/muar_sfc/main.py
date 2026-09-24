@@ -128,7 +128,7 @@ def main() -> None:
 
     alg = AlgorithmInstantiator().instantiate_algorithm(settings.alg)
     sfc_queue = SFCQueue()
-    official_rate = 20
+    official_rate = getattr(settings, "official_rate", 20.0)
     sfc_poisson_emitter = PoissonEmitter(official_rate)
     muar_scenario = MuarScenario(settings, sfc_queue, topology, sfc_poisson_emitter)
 
@@ -137,7 +137,7 @@ def main() -> None:
         (None,)
     )
 
-    simulation_duration = settings.n_sessions * official_rate
+    simulation_duration = max(settings.time, settings.n_sessions * official_rate)
     full_failure_schedule = generate_failure_schedule(settings, simulation_duration)
 
     sbn_controller = setup_controller(
