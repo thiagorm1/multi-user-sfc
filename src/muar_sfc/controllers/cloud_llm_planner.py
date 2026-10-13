@@ -121,16 +121,26 @@ class CloudLLMPlanner:
             }
             nodes_telemetry.append(info)
 
-            # Identifica nós com saturação crítica/proativa de processamento
-            if cpu_util >= 0.50:
+            # Identifica nós com saturação crítica/proativa de processamento (limiar suave em 85%)
+            if cpu_util >= 0.85:
                 high_cpu_nodes.append(node_id)
 
             # Identifica nós de borda aptos a hospedar cache regional
             is_edge = (node_type == "server_edge") or (
                 node_type == "server" and level_server != "cloud"
             )
-            if is_edge and cache_free >= 150.0 and cpu_util < 0.50:
+            if is_edge and cache_free >= 150.0 and cpu_util < 0.70:
                 cache_ready_nodes.append(node_id)
+
+        # Telemetria de Enlaces Críticos (Identifica pontes e gargalos de banda)
+        congested_links = []
+        for u, v, d in graph.edges(data=True):
+            bw_cap = float(d.get("bandwidth_capacity", 100.0))
+            bw_used = float(d.get("bandwidth_used", 0.0))
+            bw_free = max(0.0, bw_cap - bw_used)
+            util = (bw_used / max(1.0, bw_cap)) * 100.0
+            if util >= 75.0 or bw_free < 20.0:
+                congested_links.append({"link": [u, v], "util_pct": round(util, 1), "free_mbps": round(bw_free, 1)})
 
         net_cpu_pct = (total_cpu_used / total_cpu_cap * 100) if total_cpu_cap > 0 else 0.0
 
@@ -138,6 +148,7 @@ class CloudLLMPlanner:
             "net_cpu_util_pct": round(net_cpu_pct, 2),
             "high_cpu_nodes": high_cpu_nodes,
             "cache_ready_nodes": cache_ready_nodes,
+            "congested_links": congested_links[:10],
             "total_nodes_monitored": len(nodes_telemetry),
             "nodes_telemetry": nodes_telemetry,
         }
@@ -151,22 +162,22 @@ class CloudLLMPlanner:
         cache_ready_nodes = telemetry.get("cache_ready_nodes", [])
         net_cpu_pct = telemetry.get("net_cpu_util_pct", 0.0)
 
-        # Regras de Meta-Política Dinâmica
-        if high_cpu_nodes or net_cpu_pct > 25.0:
-            # Sob saturação local ou global: prioriza balanceamento de carga e admissão
-            lat_w = 0.25
-            load_w = 0.75
+        # Regras de Meta-Política Dinâmica Equilibrada
+        if high_cpu_nodes or net_cpu_pct > 60.0:
+            # Sob alta saturação: equilíbrio estrito (não abandona a latência)
+            lat_w = 0.55
+            load_w = 0.45
             sync_factor = 1.15
             strategy = (
                 f"Saturação detectada em {len(high_cpu_nodes)} nós. "
-                "Priorizando balanceamento de carga e transbordo para nós vizinhos."
+                "Balanceando carga com conservação da latência de propagação."
             )
-        elif net_cpu_pct > 10.0:
-            # Carga moderada: equilíbrio estrito
-            lat_w = 0.45
-            load_w = 0.55
-            sync_factor = 1.0
-            strategy = "Carga moderada. Operação balanceada entre latência e recursos."
+        elif net_cpu_pct > 25.0:
+            # Carga moderada: equilíbrio com leve prioridade à proximidade
+            lat_w = 0.60
+            load_w = 0.40
+            sync_factor = 1.05
+            strategy = "Carga moderada. Operação balanceada com foco em baixa latência."
         else:
             # Baixa carga: foca em ultra-baixa latência e colocação hiper-local
             lat_w = 0.75
@@ -227,14 +238,112 @@ class CloudLLMPlanner:
             )
         return None
 
+    def _call_openai_compatible_api(self, telemetry: dict[str, Any]) -> CognitiveGuidance | None:
+        """
+        Executa chamada a endpoints padrão OpenAI (Ollama, vLLM, LMStudio, Groq, OpenRouter).
+        Compatível diretamente com Qwen 2.5 e Llama 3 locais ou em nuvem.
+        """
+        try:
+            import urllib.request
+
+            base_url = getattr(self.settings, "cognitive_api_base_url", "") or "http://localhost:11434/v1"
+            endpoint = f"{base_url.rstrip('/')}/chat/completions"
+
+            system_prompt = (
+                "Você é o Orquestrador Cognitivo em Nuvem de uma rede 6G Metaverso/XR. "
+                "Responda EXCLUSIVAMENTE em formato JSON com o seguinte schema:\n"
+                "{\n"
+                '  "avoid_nodes": [int],\n'
+                '  "priority_cache_nodes": [int],\n'
+                '  "latency_weight": float (0.0 a 1.0),\n'
+                '  "load_balance_weight": float (0.0 a 1.0),\n'
+                '  "sync_tolerance_factor": float (0.5 a 2.0),\n'
+                '  "reasoning": string\n'
+                "}"
+            )
+            user_content = f"Telemetria Atual da Infraestrutura:\n{json.dumps(telemetry)}"
+
+            payload: dict[str, Any] = {
+                "model": self.model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.1,
+            }
+            if "ollama" in base_url or "localhost" in base_url:
+                payload["response_format"] = {"type": "json_object"}
+
+            data = json.dumps(payload).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_body = json.loads(response.read().decode("utf-8"))
+                msg = res_body["choices"][0]["message"]["content"]
+                parsed = json.loads(msg)
+                return CognitiveGuidance(**parsed)
+
+        except Exception as e:
+            logger.warning(
+                f"[CloudLLMPlanner] Falha ao consultar endpoint ({self.model_name}): {e}. "
+                "Recorrendo ao motor heurístico."
+            )
+            return None
+
+    def _call_gemini_api(self, telemetry: dict[str, Any]) -> CognitiveGuidance | None:
+        """Executa chamada à API Gemini com Structured Outputs para orquestração."""
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=self.api_key)
+
+            prompt = (
+                "Você é o Orquestrador Cognitivo em Nuvem de uma rede 6G Metaverso/XR. "
+                "Com base na telemetria atual da infraestrutura, defina as diretrizes para "
+                "os agentes locais MAPPO alocarem SFCs em DAG com sincronização inter-modal.\n\n"
+                f"Telemetria Atual:\n{json.dumps(telemetry, indent=2)}\n\n"
+                "Emita a resposta rigorosamente no schema CognitiveGuidance."
+            )
+
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=CognitiveGuidance,
+                    temperature=0.2,
+                ),
+            )
+
+            if response.text:
+                guidance_dict = json.loads(response.text)
+                return CognitiveGuidance(**guidance_dict)
+
+        except Exception as e:
+            logger.warning(
+                f"[CloudLLMPlanner] Falha na chamada da API LLM ({e}). "
+                "Recorrendo ao motor analítico cognitivo de fallback."
+            )
+        return None
+
     def generate_guidance(self) -> CognitiveGuidance:
         """Gera novas diretrizes cognitivas utilizando o modelo configurado."""
         self.planning_counter += 1
         telemetry = self.extract_telemetry_snapshot()
 
         guidance = None
-        if self.model_name != "mock" and self.api_key:
-            guidance = self._call_gemini_api(telemetry)
+        api_base = getattr(self.settings, "cognitive_api_base_url", "")
+        if self.model_name != "mock":
+            if "gemini" in self.model_name.lower():
+                guidance = self._call_gemini_api(telemetry)
+            elif "qwen" in self.model_name.lower() or "llama" in self.model_name.lower() or api_base:
+                guidance = self._call_openai_compatible_api(telemetry)
+            elif self.api_key:
+                guidance = self._call_gemini_api(telemetry)
 
         if guidance is None:
             guidance = self._solve_cognitive_heuristic(telemetry)

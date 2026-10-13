@@ -54,6 +54,7 @@ class SimulationSettings(BaseSettings):
     cognitive_planner_interval: float = 2.0
     cognitive_llm_model: str = "mock"
     cognitive_api_key: str = ""
+    cognitive_api_base_url: str = ""  # Base URL para modelos locais/OpenAI (ex: http://localhost:11434/v1 para Ollama)
 
     # --- Parâmetros de Confiabilidade e Falhas ---
     backup: bool = True
