@@ -206,6 +206,40 @@ def get_available_shortest_path_fast(
         return []
 
 
+def get_k_available_shortest_paths(
+    graph, source, target, bandwidth_required: float, k: int = 3
+) -> list[list]:
+    """
+    Busca até k caminhos alternativos entre source e target ordenados por latência,
+    garantindo que todas as arestas possuam bandwidth_capacity - bandwidth_used >= bandwidth_required.
+    Permite contornar gargalos pontuais em enlaces intermediários.
+    """
+    if source == target:
+        return [[source]]
+
+    # Subgrafo de arestas viáveis com capacidade residual suficiente
+    viable_edges = [
+        (u, v) for u, v, d in graph.edges(data=True)
+        if (d.get("bandwidth_capacity", 0.0) - d.get("bandwidth_used", 0.0)) >= bandwidth_required
+    ]
+    subgraph = graph.edge_subgraph(viable_edges)
+
+    if not subgraph.has_node(source) or not subgraph.has_node(target):
+        return []
+
+    try:
+        # Gerador dos caminhos mais curtos ponderados por latência
+        path_generator = nx.shortest_simple_paths(subgraph, source, target, weight="latency")
+        paths = []
+        for p in path_generator:
+            paths.append(p)
+            if len(paths) >= k:
+                break
+        return paths
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return []
+
+
 def get_available_shortest_path_optimized(
     graph, source, target, bandwidth_required, rounded=False, latencia_saltos=False
 ):
