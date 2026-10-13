@@ -7,6 +7,7 @@ from muar_sfc.algorithms.mappo.partitioner import RegionalTopologyPartitioner
 from muar_sfc.algorithms.networkUtils import (
     calculate_latency_betwen_nodes,
     get_available_shortest_path_fast,
+    get_k_available_shortest_paths,
 )
 from muar_sfc.core.sfc import SFC, VNF
 
@@ -189,24 +190,36 @@ class MAPPO_SFC_Env:
                 )
 
                 if cpu_free >= cpu_req and cache_free >= cache_req:
-                    # Verifica conectividade básica
-                    path = get_available_shortest_path_fast(
-                        self.graph, self.current_location, node, bw_req
-                    )
-                    if path:
+                    # Se for o mesmo nó atual ou possuir conectividade direta / alternativa
+                    if node == self.current_location:
                         mask[idx] = 1.0
+                    else:
+                        path = get_available_shortest_path_fast(
+                            self.graph, self.current_location, node, bw_req
+                        )
+                        if not path:
+                            alt = get_k_available_shortest_paths(
+                                self.graph, self.current_location, node, bw_req, k=2
+                            )
+                            if alt:
+                                path = alt[0]
+                        if path:
+                            mask[idx] = 1.0
 
             # Ação de Nuvem (sempre válida como fallback seguro de capacidade)
             cloud_idx = self.max_nodes_per_region
             mask[cloud_idx] = 1.0
 
             # Poda Cognitiva de Ação (Action Mask Pruning via LLM Guidance):
-            # Se nós da região foram marcados como congestionados no avoid_nodes,
-            # mascara-os desde que reste ao menos 1 candidato viável (local ou nuvem).
+            # Só mascara o nó se ele estiver criticamente saturado (CPU >= 85%)
+            # e desde que reste ao menos 1 candidato viável na região.
             if avoid_nodes:
                 for idx, node in enumerate(nodes):
                     if node in avoid_nodes and mask[idx] == 1.0 and mask.sum() > 1:
-                        mask[idx] = 0.0
+                        data_n = self.graph.nodes[node]
+                        u = data_n.get("cpu_used", 0.0) / max(1.0, data_n.get("cpu_capacity", 1.0))
+                        if u >= 0.85:
+                            mask[idx] = 0.0
 
             # Se todos os nós locais forem inválidos, a nuvem absorve
             if mask.sum() == 0:
@@ -353,9 +366,22 @@ class MAPPO_SFC_Env:
             if cand != self.cloud_node and (cpu_free < cpu_req or cache_free < cache_req):
                 continue
 
-            path = get_available_shortest_path_fast(
-                self.graph, self.current_location, cand, bw_req
-            )
+            # Se for o mesmo nó físico da VNF anterior, caminho é local (0 saltos de rede)
+            if self.current_location == cand:
+                path = [cand]
+            else:
+                # Tenta caminho mais rápido direto com poda de Dijkstra
+                path = get_available_shortest_path_fast(
+                    self.graph, self.current_location, cand, bw_req
+                )
+                # Se o caminho direto estiver sem banda, busca até 3 rotas alternativas (K-shortest paths)
+                if not path:
+                    alt_paths = get_k_available_shortest_paths(
+                        self.graph, self.current_location, cand, bw_req, k=3
+                    )
+                    if alt_paths:
+                        path = alt_paths[0]
+
             if not path and self.current_location != cand:
                 continue
 
@@ -375,9 +401,17 @@ class MAPPO_SFC_Env:
 
             cpu_util = data.get("cpu_used", 0.0) / max(1.0, data.get("cpu_capacity", 1.0))
             avoid_nodes_list = getattr(self.cognitive_guidance, "avoid_nodes", []) or []
-            avoid_penalty = 50.0 if (cand in avoid_nodes_list) else 0.0
+            
+            # Penalidade suave proporcional à saturação quadrática em vez de binária rígida
+            avoid_penalty = (12.0 * (cpu_util ** 2)) if (cand in avoid_nodes_list) else 0.0
 
-            cost = (w_lat * step_lat) + (w_lb * cpu_util * 25.0) + avoid_penalty
+            # Custo WAN explícito se for Cloud (prioriza esgotar a borda antes da nuvem)
+            cloud_cost = 25.0 if (cand == self.cloud_node) else 0.0
+
+            # Bonificação de co-locação agressiva: consolida VNFs no mesmo nó físico (elimina com_lat e poupa links)
+            colocation_bonus = 12.0 if (cand == self.current_location and cand != self.cloud_node) else 0.0
+
+            cost = (w_lat * step_lat) + (w_lb * cpu_util * 20.0) + avoid_penalty + cloud_cost - colocation_bonus
 
             if cost < best_cost:
                 best_cost = cost
