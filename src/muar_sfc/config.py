@@ -1,27 +1,27 @@
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 1. Definição do ROOT_DIR usando Pathlib (Seguro e Multiplataforma)
 ROOT_DIR: Path = Path(__file__).resolve().parent.parent.parent
+
 
 class SimulationSettings(BaseSettings):
     """
     Configurações unificadas e validadas do Simulador SFC.
     O Pydantic fará a conversão automática de tipos e validação estrutural nativa.
     """
+
     model_config = SettingsConfigDict(
-        env_prefix="MUAR_",
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore"
+        env_prefix="MUAR_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
     time: float = 1000.0
 
     # --- Parâmetros Gerais e de Log ---
     application: str = "muar"
+    muvr_destination_mode: str = "same_access"
     alg: str = "replic"
     sfc_lifetime: int = 120
 
@@ -43,25 +43,39 @@ class SimulationSettings(BaseSettings):
     sfc: bool = True
     dag: bool = False
     sync_tolerance: float = 5.0  # Janela máxima de sincronização inter-modal (ms)
-    n_mappo_regions: int = 4     # Número de regiões/clusters de borda para o MAPPO
-    mappo_model_path: str = ""   # Caminho customizado para os pesos do MAPPO
+    n_mappo_regions: int = 4  # Número de regiões/clusters de borda para o MAPPO
+    mappo_model_path: str = ""  # Caminho customizado para os pesos do MAPPO
     share: bool = True
     shareband: bool = False
     allow_delay: bool = False
+    admission_max_wait: float = Field(default=30.0, ge=0)
+    admission_retry_interval: float = Field(default=1.0, gt=0)
+    cpu_capacity_factor: float = Field(default=1.0, ge=1)
+    cache_capacity_factor: float = Field(default=1.0, ge=1)
+    link_capacity_factor: float = Field(default=1.0, ge=1)
+    wireless_capacity_factor: float = Field(default=1.0, ge=1)
+    source_bandwidth_mbps: float = Field(default=0.0, ge=0)
+    mappo_policy_weight: float = Field(default=0.5, ge=0)
+    mappo_search_attempts: int = Field(default=8, ge=1)
+    seed: int = 42
 
     # --- Parâmetros do Orquestrador Cognitivo (Cloud LLM Planner) ---
     cognitive_planner: bool = False
-    cognitive_planner_interval: float = 2.0
+    cognitive_planner_interval: float = Field(default=2.0, gt=0)
     cognitive_llm_model: str = "mock"
+    cognitive_api_timeout: float = Field(default=30.0, gt=0)
+    cognitive_max_tokens: int = Field(default=1024, gt=0)
     cognitive_api_key: str = ""
-    cognitive_api_base_url: str = ""  # Base URL para modelos locais/OpenAI (ex: http://localhost:11434/v1 para Ollama)
+    cognitive_api_base_url: str = ""  # Ollama: http://localhost:11434/v1
+    cognitive_guidance_max_age: float = Field(default=120.0, gt=0)
+    ar_motion_to_photon_budget_ms: float | None = Field(default=None, gt=0)
 
     # --- Parâmetros de Confiabilidade e Falhas ---
     backup: bool = True
     ava: float = 0.99
     number_of_fails: int = 3
     min_fail_duration: float = 20.0
-    crash_at: list[float] = [125,155,185]  # Exemplo de tempos fixos para falhas (em segundos)
+    crash_at: list[float] = [125, 155, 185]  # Exemplo de tempos fixos para falhas (em segundos)
 
     # --- Configuração MICRO (Confiabilidade Base por Nível) ---
     rel_high: float = 0.999

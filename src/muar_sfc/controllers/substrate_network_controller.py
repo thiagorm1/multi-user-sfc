@@ -1,12 +1,13 @@
 import random
-import sys
 import threading
 import time
 from collections import deque
+from contextlib import suppress
 from typing import Any
 
 from loguru import logger
 
+from muar_sfc.controllers.admission_queue import AdmissionQueue
 from muar_sfc.controllers.modules.backup_manager import BackupManager
 from muar_sfc.controllers.modules.crasher import Crasher
 from muar_sfc.controllers.modules.failure_orchestrator import FailureOrchestrator
@@ -37,7 +38,7 @@ class SubstrateNetworkController:
         players: int = 6,
         flows: int = 0,
         sfc_name: bool = True,
-        verbose: bool = False
+        verbose: bool = False,
     ):
         self.substrate_network = substrate_network
         self.sfc_queue = sfc_queue
@@ -64,7 +65,7 @@ class SubstrateNetworkController:
         self.failure_schedule = deque(failure_schedule)
         self.active_failures: list[Any] = []
         self.timer: threading.Timer | None = None
-        
+
         self.mobility_interval = 5
         self.backup_interval_creation = 5
         self.last_mobility_time = 0.0
@@ -74,6 +75,14 @@ class SubstrateNetworkController:
         self.max_queue_size = 0
         self.success: list[Any] = []
         self.counter = 0
+        settings = sfc_instantiator.args
+        self.admission_queue = AdmissionQueue(
+            getattr(settings, "allow_delay", False),
+            getattr(settings, "admission_max_wait", 30.0),
+            getattr(settings, "admission_retry_interval", 1.0),
+            clock=time.time,
+        )
+        self.completed_admissions = 0
 
         self.failure_orchestrator = FailureOrchestrator(
             substrate_network=self.substrate_network,
@@ -83,7 +92,7 @@ class SubstrateNetworkController:
             output_writter=self.output_writter,
             alg=self.alg,
             verbose=self.verbose,
-            requeue_callback=self.send_back_to_queue
+            requeue_callback=self.send_back_to_queue,
         )
 
     def start(self) -> None:
@@ -93,14 +102,17 @@ class SubstrateNetworkController:
             time.sleep(2 * self.update_interval)
 
         self.is_stopped = False
-        
-        # EAFP: O contrato determina que se MobilityManager foi instanciado, 'activated' deve estar acessível
+
+        # EAFP: O contrato determina que se MobilityManager foi instanciado, 'activated'
+        # deve estar acessível
         if self.mobility_manager:
             try:
                 if self.mobility_manager.activated:
                     self.mobility_manager.start_simulation()
             except AttributeError as e:
-                raise RuntimeError("MobilityManager não implementa o atributo obrigatório 'activated'") from e
+                raise RuntimeError(
+                    "MobilityManager não implementa o atributo obrigatório 'activated'"
+                ) from e
 
         threading.Thread(target=self.sequential_operation, daemon=True).start()
 
@@ -112,7 +124,10 @@ class SubstrateNetworkController:
         if self.timer:
             self.timer.cancel()
         logger.info("Simulação encerrada.")
-        sys.exit(0)
+        if hasattr(self.output_writter, "flows_file"):
+            self.admission_queue.dump(
+                self.output_writter.flows_file.with_suffix(".admission.json")
+            )
 
     def initialize_timers(self) -> None:
         self.mobility_interval = 5
@@ -135,7 +150,7 @@ class SubstrateNetworkController:
             processed_sfcs = self.submit_sfcs()
             if self.check_simulation_end(processed_sfcs):
                 self.stop()
-            
+
             self.iteration_counter += 1
             if not processed_sfcs:
                 time.sleep(0.01)
@@ -146,13 +161,19 @@ class SubstrateNetworkController:
             self.cognitive_planner.step_planning(current_time, algorithm=self.alg)
 
     def handle_mobility(self) -> None:
-        if self.mobility_manager and self.mobility_manager.activated:
-            if time.time() - self.last_mobility_time >= self.mobility_interval:
-                self.check_mobility()
-                self.last_mobility_time = time.time()
+        if (
+            self.mobility_manager
+            and self.mobility_manager.activated
+            and time.time() - self.last_mobility_time >= self.mobility_interval
+        ):
+            self.check_mobility()
+            self.last_mobility_time = time.time()
 
     def handle_backups(self) -> None:
-        if not self.sfc_manager.backup_manager or not self.sfc_manager.backup_manager.backup_activated:
+        if (
+            not self.sfc_manager.backup_manager
+            or not self.sfc_manager.backup_manager.backup_activated
+        ):
             return
 
         current_time = time.time()
@@ -168,7 +189,9 @@ class SubstrateNetworkController:
             self._deploy_backups_to_network(created_backup_groups)
             if self.verbose:
                 count = sum(len(group) for group in created_backup_groups)
-                logger.info(f"[BACKUP] Ciclo concluído. {count} novos backups registrados via {strategy}.")
+                logger.info(
+                    f"[BACKUP] Ciclo concluído. {count} novos backups registrados via {strategy}."
+                )
 
         self.last_backup_time = current_time
 
@@ -180,8 +203,9 @@ class SubstrateNetworkController:
                 except AttributeError:
                     route_info = {}
 
-                # A máscara de Exception genérica foi removida para garantir Fail-Fast. 
-                # Falhas de implantação física deverão abortar o run para evitar falso-positivos na simulação.
+                # A máscara de Exception genérica foi removida para garantir Fail-Fast.
+                # Falhas de implantação física deverão abortar o run para evitar
+                # falso-positivos na simulação.
                 self.substrate_network.deploy_sfc(backup_sfc, route_info)
 
     def handle_fails(self) -> None:
@@ -201,7 +225,7 @@ class SubstrateNetworkController:
                         self.failure_orchestrator.link_recovery_operation(failure["target"])
             else:
                 pending_failures.append(failure)
-        
+
         self.active_failures = pending_failures
 
         if self.failure_schedule and elapsed_time >= self.failure_schedule[0]["start"]:
@@ -213,60 +237,74 @@ class SubstrateNetworkController:
                     crashed_nodes, _ = self.failure_orchestrator.server_fail_operation()
                     if crashed_nodes and duration > 0:
                         recovery_time = elapsed_time + duration
-                        self.active_failures.append({"type": "node", "target": crashed_nodes, "recovery_time": recovery_time})
+                        self.active_failures.append(
+                            {
+                                "type": "node",
+                                "target": crashed_nodes,
+                                "recovery_time": recovery_time,
+                            }
+                        )
                         logger.info(f" -> Recuperação (node) agendada para T={recovery_time:.2f}s")
                 case "link":
                     link_crashed, _ = self.failure_orchestrator.link_fail_operation()
                     if link_crashed and duration > 0:
                         recovery_time = elapsed_time + duration
-                        self.active_failures.append({"type": "link", "target": link_crashed, "recovery_time": recovery_time})
+                        self.active_failures.append(
+                            {
+                                "type": "link",
+                                "target": link_crashed,
+                                "recovery_time": recovery_time,
+                            }
+                        )
                         logger.info(f" -> Recuperação (link) agendada para T={recovery_time:.2f}s")
 
     def submit_sfcs(self) -> list[str]:
         self.check_timer_queue()
-
-        if self.max_queue_size < self.sfc_queue.qsize():
-            self.max_queue_size = self.sfc_queue.qsize()
-        
-        processed_sfcs = []
-        start_time = time.time()
-
-        while self.sfc_queue.qsize() != 0:
-            if time.time() - start_time > 1:
+        while not self.sfc_queue.empty():
+            batch = self.sfc_queue.peek_sfc()
+            now = time.time()
+            self.admission_queue.register(batch, now, getattr(batch[0], "arrival_time", now))
+        self.max_queue_size = max(self.max_queue_size, self.admission_queue.pending)
+        processed = []
+        start = time.time()
+        while time.time() - start <= 1:
+            now = time.time()
+            request = self.admission_queue.next_ready(now)
+            if request is None:
                 break
+            output = {}
 
-            sfc_list = self.sfc_queue.peek_sfc()
-            dequeue_time = time.time()
+            def deploy(batch):
+                nonlocal output
+                output, success = self.deploy_sfc_list(batch)
+                return success, [output[s.id]["latency"] for s in batch] if success else []
 
-            # EAFP estrito e em cascata para extração do tempo
-            try:
-                wait_time = dequeue_time - sfc_list[0].enqueue_time
-            except AttributeError:
-                try:
-                    wait_time = dequeue_time - sfc_list[0].arrival_time
-                except AttributeError:
-                    wait_time = 0.0
+            def rollback(batch):
+                self.sfc_manager.cleanup_session_state(batch[0].dst_node)
+                for sfc in batch:
+                    self.substrate_network.undeploy_sfc(sfc.id)
+                self.remove_mobile_user(batch[0].dst_node)
 
-            for sfc in sfc_list:
-                if self.sfc_manager.is_session_active(sfc.dst_node):
-                    raise ValueError(f"Estado de Rede Corrompido: SFC {sfc.id} já consta como submetida.")
-
-            log_output, is_success = self.deploy_sfc_list(sfc_list)
-
-            for sfc_id, result_dict in log_output.items():
-                processed_sfcs.append(sfc_id)
-                self.output_results(sfc_id=sfc_id, results_dict=result_dict, is_success=is_success, wait_time=wait_time)
-
-            if self.verbose:
-                sfc_names = ", ".join([s.id for s in sfc_list])
-                if is_success:
-                    logger.success(f"Physical alloc. complete: batch [{sfc_names}] implanted.")
-                else:
-                    logger.error(f"Physical alloc. failed: batch [{sfc_names}] rejected due to resource unavailability.")
-
-                self.output_writter.print_output_info(self.substrate_network, self.success)
-
-        return processed_sfcs
+            complete = self.admission_queue.attempt(request, now, deploy, rollback)
+            if not complete:
+                continue
+            self.completed_admissions += 1
+            success = request.status.startswith("accepted")
+            for sfc in request.batch:
+                processed.append(sfc.id)
+                result = output.get(sfc.id, {"latency": None, "run_duration": 0})
+                result["admission_status"] = request.status
+                self.output_results(
+                    result,
+                    sfc.id,
+                    success,
+                    wait_time=max(0.0, request.completed_at - request.arrival),
+                )
+            if hasattr(self.output_writter, "flows_file"):
+                self.admission_queue.dump(
+                    self.output_writter.flows_file.with_suffix(".admission.json")
+                )
+        return processed
 
     def deploy_sfc_list(self, sfc_list) -> tuple[Any, bool]:
         mob_player_id = self.create_mobile_user(sfc_list)
@@ -274,7 +312,10 @@ class SubstrateNetworkController:
             sfc_list, self.substrate_network
         )
         if is_success:
-            self.sfc_manager.submit_solution(sfc_list, solution, self.substrate_network)
+            result = self.sfc_manager.submit_solution(sfc_list, solution, self.substrate_network)
+            is_success = result["is_success"]
+            if not is_success:
+                self.remove_mobile_user(mob_player_id)
         else:
             self.remove_mobile_user(mob_player_id)
         return solution, is_success
@@ -292,7 +333,9 @@ class SubstrateNetworkController:
 
         if remaining_dur <= 1.0:
             if self.verbose:
-                logger.info(f"[Queue] Sessão {session_id} expirou durante falha. Cancelando re-deploy.")
+                logger.info(
+                    f"[Queue] Sessão {session_id} expirou durante falha. Cancelando re-deploy."
+                )
             self._force_cleanup_session(session_id)
             return
 
@@ -310,11 +353,12 @@ class SubstrateNetworkController:
     def check_timer_queue(self) -> None:
         if not self.timer_qeue_sfcs:
             return
-            
+
         final_time = time.time()
         time_elapsed = final_time - self.timer_qeue_sfcs[0]["timer"]
-        
-        # Limpeza O(1) estrutural. Em cenários reais, um Deque pode operar na ponta sem reconstruir a lista.
+
+        # Limpeza O(1) estrutural. Em cenários reais, um Deque pode operar na ponta sem
+        # reconstruir a lista.
         if time_elapsed >= random.uniform(5, 6):
             current_enqueue_time = time.time()
             for entry in self.timer_qeue_sfcs:
@@ -326,7 +370,7 @@ class SubstrateNetworkController:
     def check_mobility(self) -> None:
         if not self.sfc_manager.tracker.sfcs_tracker:
             return
-            
+
         sfcs_moved, new_locations = self.mobility_manager.check_all_vehicles_position_changes()
         for sfc_list, new_location in zip(sfcs_moved, new_locations, strict=False):
             obj_sfc_list = []
@@ -337,32 +381,33 @@ class SubstrateNetworkController:
                     obj_sfc_list.append(sfc_obj)
                 except KeyError:
                     if self.verbose:
-                        logger.warning(f"[MOBILITY] Ignorando movimento da SFC {sfc_id} (SFC offline).")
+                        logger.warning(
+                            f"[MOBILITY] Ignorando movimento da SFC {sfc_id} (SFC offline)."
+                        )
                     valid_move = False
                     break
 
             if valid_move and obj_sfc_list:
                 logger.info(f"SFCs moved: {sfc_list} | New Location: {new_location}")
-                self.send_back_to_queue(obj_sfc_list, changed_location=True, new_location=new_location)
+                self.send_back_to_queue(
+                    obj_sfc_list, changed_location=True, new_location=new_location
+                )
 
     def create_mobile_user(self, sfc_list) -> str:
-        return self.mobility_manager.register_mobile_user_in_network(sfc_list, self.substrate_network)
+        return self.mobility_manager.register_mobile_user_in_network(
+            sfc_list, self.substrate_network
+        )
 
     def remove_mobile_user(self, sfc_list_id: str) -> None:
         self.mobility_manager.remove_player(sfc_list_id)
         self.substrate_network.remove_node(sfc_list_id)
 
     def check_simulation_end(self, sfc_list: list[str]) -> bool:
-        last_sf_mono = f"sfc_unique_p{self.players}_{self.flows}"
-        last_sf_dec = f"sfc_mono_p{self.players}_{self.flows}"
-        last_sf_dag = f"sfc_dag_p{self.players}_{self.flows}"
-        for sfc_id in sfc_list:
-            if sfc_id in (last_sf_mono, last_sf_dec, last_sf_dag):
-                logger.info(f"[INFO] Last SFC released detected: {sfc_id}")
-                logger.info(f"Max queue size: {self.max_queue_size}")
-                time.sleep(1)
-                return True
-        return False
+        return (
+            self.completed_admissions >= self.players * self.flows
+            and self.admission_queue.pending == 0
+            and self.sfc_queue.empty()
+        )
 
     def handle_resources_cleanup(self) -> None:
         current_time = time.time()
@@ -383,20 +428,30 @@ class SubstrateNetworkController:
             self.substrate_network.undeploy_sfc(sfc_id)
         except KeyError as e:
             # Substituímos Exception genérica pela exceção explícita de nó ausente.
-            # Se for um erro crítico estrutural, o framework irá interromper para garantir coerência.
-            raise RuntimeError(f"Corrupção de grafo ao remover SFC {sfc_id}: O recurso já não existe.") from e
+            # Se for um erro crítico estrutural, o framework irá interromper para
+            # garantir coerência.
+            raise RuntimeError(
+                f"Corrupção de grafo ao remover SFC {sfc_id}: O recurso já não existe."
+            ) from e
 
     def _safe_undeploy_backup(self, backup_id: str) -> None:
         try:
             self.substrate_network.undeploy_sfc(backup_id)
         except KeyError as e:
-            raise RuntimeError(f"Corrupção de grafo ao remover backup {backup_id}: O recurso já não existe.") from e
+            raise RuntimeError(
+                f"Corrupção de grafo ao remover backup {backup_id}: O recurso já não existe."
+            ) from e
 
         if self.sfc_manager.backup_manager:
             self.sfc_manager.backup_manager.cleanup_internal_state(backup_id)
 
     def output_results(
-        self, results_dict: dict, sfc_id: str, is_success: bool, res_output: bool = False, wait_time: float | None = None
+        self,
+        results_dict: dict,
+        sfc_id: str,
+        is_success: bool,
+        res_output: bool = False,
+        wait_time: float | None = None,
     ) -> None:
         current_time = time.time()
 
@@ -417,12 +472,10 @@ class SubstrateNetworkController:
             )
 
         # Usando EAFP para garantir que o FailureOrchestrator implemente o protocolo corretamente.
-        try:
+        with suppress(AttributeError):
             self.failure_orchestrator.update_crash_recovery_status(
                 sfc_id=sfc_id,
                 results_dict=results_dict,
                 is_success=is_success,
-                current_time=current_time
+                current_time=current_time,
             )
-        except AttributeError:
-            pass # Orquestrador mais simples, sem logging avançado.

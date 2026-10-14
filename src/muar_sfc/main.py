@@ -1,12 +1,10 @@
+import random
 import signal
 import sys
 import time
 from typing import Any, TypedDict
 
 from loguru import logger
-
-logger.remove()
-logger.add(sys.stderr, format="<cyan>[{file.name}]</cyan> <level>{message}</level>", level="INFO")
 
 from muar_sfc.algorithms.instantiator import AlgorithmInstantiator
 from muar_sfc.config import SimulationSettings
@@ -17,11 +15,15 @@ from muar_sfc.controllers.modules.sfcs_instatiator import SFCInstatiator
 from muar_sfc.controllers.modules.sfcs_manager import SFCManager
 from muar_sfc.controllers.sfc_queue import SFCQueue
 from muar_sfc.controllers.substrate_network_controller import SubstrateNetworkController
+from muar_sfc.core.capacity import apply_capacity_profile
 from muar_sfc.core.poisson_emitter import PoissonEmitter
 from muar_sfc.core.scenarios.muar import MuarScenario
 from muar_sfc.topology.instantiator import TopologyInstantiator
 from muar_sfc.utils.failure_generator import calcular_janelas_falha
 from muar_sfc.utils.manager_results import OutputWritter, create_output_dir
+
+logger.remove()
+logger.add(sys.stderr, format="<cyan>[{file.name}]</cyan> <level>{message}</level>", level="INFO")
 
 
 class FailureEvent(TypedDict):
@@ -30,7 +32,9 @@ class FailureEvent(TypedDict):
     duration: float
 
 
-def generate_failure_schedule(settings: SimulationSettings, simulation_duration: float) -> list[FailureEvent]:
+def generate_failure_schedule(
+    settings: SimulationSettings, simulation_duration: float
+) -> list[FailureEvent]:
     """Gera o cronograma de falhas para nós e links de forma unificada."""
     fixed_time = settings.crash_at
     if fixed_time and fixed_time[0] == -1.0:
@@ -54,18 +58,22 @@ def generate_failure_schedule(settings: SimulationSettings, simulation_duration:
     full_failure_schedule: list[FailureEvent] = []
 
     for start, duration in raw_node_schedule:
-        full_failure_schedule.append({
-            "type": "node",
-            "start": float(start),
-            "duration": float(duration),
-        })
+        full_failure_schedule.append(
+            {
+                "type": "node",
+                "start": float(start),
+                "duration": float(duration),
+            }
+        )
 
     for start, duration in raw_link_schedule:
-        full_failure_schedule.append({
-            "type": "link",
-            "start": float(start),
-            "duration": float(duration),
-        })
+        full_failure_schedule.append(
+            {
+                "type": "link",
+                "start": float(start),
+                "duration": float(duration),
+            }
+        )
 
     full_failure_schedule.sort(key=lambda x: x["start"])
     return full_failure_schedule
@@ -80,6 +88,8 @@ def setup_controller(
 ) -> SubstrateNetworkController:
     """Instancia e configura o controlador da rede substrata usando Injeção de Dependência."""
     network = topology.generate_substrate_network()
+    apply_capacity_profile(network, settings)
+    network.set_bandwidth_sharing(settings.shareband)
     network.set_reliability_params(settings)
 
     share_str = "y" if settings.share else "n"
@@ -91,9 +101,10 @@ def setup_controller(
     sfc_manager.alg_name = settings.alg
 
     sfc_instantiator = SFCInstatiator(alg, args=settings)
+    sfc_instantiator.verbose = settings.verbose
     fail_manager = Crasher(topology=topology, args=settings)
     mobility_manager = MobilityManager(settings)
-    
+
     cognitive_planner = None
     if getattr(settings, "cognitive_planner", False):
         from muar_sfc.controllers.cloud_llm_planner import CloudLLMPlanner
@@ -122,7 +133,7 @@ def setup_controller(
         players=settings.n_players,
         flows=settings.n_sessions,
         sfc_name=settings.sfc,
-        verbose=settings.verbose
+        verbose=settings.verbose,
     )
 
     return sbn_controller
@@ -131,6 +142,17 @@ def setup_controller(
 def main() -> None:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     settings = SimulationSettings()
+    if settings.application == "muvr_reference":
+        from muar_sfc.core.scenarios.muvr_reference import run_configured
+
+        run_configured(settings)
+        return
+    import numpy as np
+    import torch
+
+    random.seed(settings.seed)
+    np.random.seed(settings.seed)
+    torch.manual_seed(settings.seed)
 
     topology = TopologyInstantiator().instantiate_topology(
         settings.topology,
@@ -138,22 +160,23 @@ def main() -> None:
     )
 
     alg = AlgorithmInstantiator().instantiate_algorithm(settings.alg)
+    if settings.alg.lower() == "mappo":
+        from pathlib import Path
+
+        alg.n_regions = settings.n_mappo_regions
+        if settings.mappo_model_path:
+            alg.model_path = Path(settings.mappo_model_path)
     sfc_queue = SFCQueue()
     official_rate = getattr(settings, "official_rate", 20.0)
     sfc_poisson_emitter = PoissonEmitter(official_rate)
     muar_scenario = MuarScenario(settings, sfc_queue, topology, sfc_poisson_emitter)
 
-    sfc_poisson_emitter.start(
-        muar_scenario.generate_sfc_session,
-        (None,)
-    )
-
     simulation_duration = max(settings.time, settings.n_sessions * official_rate)
     full_failure_schedule = generate_failure_schedule(settings, simulation_duration)
 
-    sbn_controller = setup_controller(
-        settings, topology, sfc_queue, alg, full_failure_schedule
-    )
+    sbn_controller = setup_controller(settings, topology, sfc_queue, alg, full_failure_schedule)
+
+    sfc_poisson_emitter.start(muar_scenario.generate_sfc_session, (None,))
 
     try:
         logger.info("Iniciando a simulação do controlador de rede...")
@@ -164,9 +187,11 @@ def main() -> None:
             time.sleep(1)
 
     except KeyboardInterrupt:
-        logger.warning("Execução interrompida pelo usuário (Ctrl+C). Iniciando encerramento suave...")
-        sbn_controller.stop()        # 1. Para o Controlador
-        sfc_poisson_emitter.stop()   # 2. Para o Gerador de Sessões (A CORREÇÃO)
+        logger.warning(
+            "Execução interrompida pelo usuário (Ctrl+C). Iniciando encerramento suave..."
+        )
+        sbn_controller.stop()  # 1. Para o Controlador
+        sfc_poisson_emitter.stop()  # 2. Para o Gerador de Sessões (A CORREÇÃO)
         sys.exit(0)
 
 
