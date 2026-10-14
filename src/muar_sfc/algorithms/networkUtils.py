@@ -2,7 +2,6 @@ import math
 import random
 
 import networkx as nx
-import numpy as np
 
 from muar_sfc.core.net_v2 import Net2
 
@@ -177,10 +176,9 @@ def get_available_shortest_path_fast(
         edge_data = graph.edges[u, v]
         available_bw = edge_data.get("bandwidth_capacity", 0) - edge_data.get("bandwidth_used", 0)
 
-        # Se a banda for insuficiente, o custo deste link é "infinito",
-        # fazendo com que o Dijkstra o evite.
+        # Oculta enlaces sem banda; custo infinito ainda permite uma rota inválida.
         if available_bw < bandwidth_required:
-            return np.inf
+            return None
 
         # Se a banda for suficiente, retorna o peso de latência desejado.
         if rounded:
@@ -199,8 +197,7 @@ def get_available_shortest_path_fast(
         path = nx.dijkstra_path(graph, source, target, weight=weight_func)
         return path
     except nx.NetworkXNoPath:
-        # Esta exceção agora é levantada se todos os caminhos possíveis
-        # tiverem um link com peso infinito (sem banda).
+        # Não há caminho após ocultar os enlaces sem banda.
         return []
     except nx.NodeNotFound:
         return []
@@ -211,7 +208,7 @@ def get_k_available_shortest_paths(
 ) -> list[list]:
     """
     Busca até k caminhos alternativos entre source e target ordenados por latência,
-    garantindo que todas as arestas possuam bandwidth_capacity - bandwidth_used >= bandwidth_required.
+    garantindo banda disponível suficiente em todas as arestas.
     Permite contornar gargalos pontuais em enlaces intermediários.
     """
     if source == target:

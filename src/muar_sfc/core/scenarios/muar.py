@@ -74,6 +74,7 @@ class MuarScenario:
         self.topology = topology
         self.src_node = 0
         self.max_duration = int(args.sfc_lifetime)
+        self.latency_limit = float(args.latency)
         self.average_time_session_arrival = 20
         self.factor = 0.33  # 1 jogador consome `FACTOR*100%` dos recursos
 
@@ -166,7 +167,7 @@ class MuarScenario:
                 (f"IA_DET_FT_{counter}", f"UNI_p{i}_{counter}", UNI_bw),
                 (f"MA_region_{closer_router}", f"RE_p{i}_{counter}", MA_bw),
                 (f"UNI_p{i}_{counter}", f"RE_p{i}_{counter}", UNI_bw),
-                (f"RE_p{i}_{counter}", f"EC_TC_p{i}_{counter}", EC_TC_bw),
+                (f"RE_p{i}_{counter}", f"EC_TC_p{i}_{counter}", RE_bw),
                 (f"EC_TC_p{i}_{counter}", "dst", EC_TC_bw),
             ]
 
@@ -179,7 +180,7 @@ class MuarScenario:
                 "dst_node": f"{i}{counter}",
                 "closer_router": closer_router,
                 "duration": duration,
-                "latency": min_latency_acc,
+                "latency": self.latency_limit,
             }
 
             sfc_dag = SFCGenerator(dag_dict).generate()
@@ -322,7 +323,7 @@ class MuarScenario:
             player_cache_dict["closer_router"] = closer_router
 
             player_cache_dict["duration"] = duration
-            player_cache_dict["latency"] = min_latency_acc
+            player_cache_dict["latency"] = self.latency_limit
             players_sfc_cache_dict_list.append(player_cache_dict)
 
             player_unique_dict = {}
@@ -334,7 +335,7 @@ class MuarScenario:
             player_unique_dict["closer_router"] = closer_router
 
             player_unique_dict["duration"] = duration
-            player_unique_dict["latency"] = min_latency_acc
+            player_unique_dict["latency"] = self.latency_limit
             players_sfc_unique_dict_list.append(player_unique_dict)
 
         players_sfc_list = []

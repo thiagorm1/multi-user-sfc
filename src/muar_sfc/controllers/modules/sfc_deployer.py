@@ -24,7 +24,9 @@ class SFCDeployer:
         for sfc in sfc_list:
             if sfc.id not in solution or solution[sfc.id].get("route_info") is None:
                 if self.verbose:
-                    logger.warning(f"[Deployer] Solução inválida ou sem rotas para a SFC {sfc.id}.")
+                    logger.warning(
+                        f"[Deployer] Solução inválida ou sem rotas para a SFC {sfc.id}."
+                    )
                 return {"is_success": False, "route_info": None}
 
         for sfc in sfc_list:
@@ -37,7 +39,7 @@ class SFCDeployer:
                 route_info_export[sfc.id] = rf
                 deployed_in_this_batch.append(sfc.id)
 
-            except Exception as e:
+            except ValueError as e:
                 logger.error(f"[Deployer] Deploy falhou na infraestrutura para {sfc.id}: {e}")
                 deployment_success = False
                 break
@@ -49,7 +51,9 @@ class SFCDeployer:
                     substrate_network.undeploy_sfc(sfc_id)
                     self.tracker.sfcs_routing_info.pop(sfc_id, None)
                 except RuntimeError as rollback_e:
-                    logger.exception(f"Falha CRÍTICA ao aplicar rollback na SFC {sfc_id}: {rollback_e}")
+                    logger.exception(
+                        f"Falha CRÍTICA ao aplicar rollback na SFC {sfc_id}: {rollback_e}"
+                    )
 
             return {"is_success": False, "route_info": None}
 
@@ -58,19 +62,24 @@ class SFCDeployer:
             duration = getattr(sfc_list[0], "duration", 100)
 
             if group_id in self.tracker.sfcs_tracker:
-                logger.warning(f"[Deployer] Aviso: SFC Session {group_id} já instanciada. Sobrescrevendo rastreamento.")
+                logger.warning(
+                    f"[Deployer] SFC Session {group_id} já instanciada. "
+                    "Sobrescrevendo rastreamento."
+                )
 
             self.tracker.sfcs_tracker[group_id] = {
                 "sfc_list": sfc_list,
                 "solution": solution,
                 "duration": duration,
-                "timer": time.time()
+                "timer": time.time(),
             }
             self.tracker.counter += 1
 
         return {"is_success": deployment_success, "route_info": route_info_export}
 
-    def run_garbage_collection(self, substrate_network: Net2, backup_manager: BackupManager | None) -> None:
+    def run_garbage_collection(
+        self, substrate_network: Net2, backup_manager: BackupManager | None
+    ) -> None:
         infra_sfc_ids = set(substrate_network.sfc_dict.keys())
         valid_logical_ids = set()
 
@@ -92,9 +101,11 @@ class SFCDeployer:
             for z_id in zombie_ids:
                 try:
                     substrate_network.undeploy_sfc(z_id)
-                except RuntimeError as e:
+                except RuntimeError:
                     # Fail-Fast: Se o zumbi corromper o grafo, a simulação cai.
-                    logger.exception(f"[GC] Erro crítico ao limpar zumbi {z_id} da infraestrutura.")
+                    logger.exception(
+                        f"[GC] Erro crítico ao limpar zumbi {z_id} da infraestrutura."
+                    )
                     raise
 
     def safe_network_removal(self, sfc_id: str, substrate_network: Net2) -> None:
@@ -102,6 +113,9 @@ class SFCDeployer:
             substrate_network.undeploy_sfc(sfc_id)
             if self.verbose:
                 logger.debug(f"[RECURSOS LIBERADOS] Instância {sfc_id} purgada da rede física.")
-        except RuntimeError as e:
-            logger.exception(f"[FALHA DE DESALOCAÇÃO] Erro CRÍTICO ao tentar remover {sfc_id} da infraestrutura.")
+        except RuntimeError:
+            logger.exception(
+                f"[FALHA DE DESALOCAÇÃO] Erro CRÍTICO ao tentar remover "
+                f"{sfc_id} da infraestrutura."
+            )
             raise

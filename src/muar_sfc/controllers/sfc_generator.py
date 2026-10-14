@@ -45,6 +45,7 @@ class SFCGenerator:
         src_vnf = VNFSRC()
         dst_vnf = VNFDST()
         sfc = SFC(src_vnf, dst_vnf)
+        src_vnf.set_outcome_interface_bandwidth(self.vnf_id_list[0]["in_bw"])
         sfc.vnfs_dict = self.vnf_id_list
         sfc.id = self.sfc_name
 

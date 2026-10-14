@@ -1,4 +1,5 @@
 import networkx as nx
+
 from muar_sfc.core.vnf import VNF
 
 
@@ -16,6 +17,7 @@ class SFC:
         self.sync_tolerance = 5.0  # Tolerância máxima de sincronização inter-modal (ms)
 
         self.link_bandwidth_dict = {}
+        self.edge_routes = {}
         self.latency_request = 0
         self.id = None
         self.input_throughput = 0
@@ -125,23 +127,15 @@ class SFC:
         self.update()
 
     def update(self):
-        # if not self.input_throughput:
-        #    return
-        # tp = self.input_throughput
-        vnf = self.src
-        self.link_bandwidth_dict[(vnf.id, vnf.next_vnf.id)] = vnf.get_outcome_interface_bandwidth()
-        vnf = vnf.next_vnf
-
-        while vnf.next_vnf:
-            # vnf.vnf_function()
-            next_vnf = vnf.next_vnf
-            link_bw = vnf.get_outcome_interface_bandwidth()
-            # if not link_bw:
-            #    print("outcome bandwith not set")
-            #    return
-            next_vnf.set_income_interface_bandwidth(link_bw)
-            self.link_bandwidth_dict[(vnf.id, next_vnf.id)] = link_bw
-            vnf = next_vnf
+        """Preserve fork edges and sum incoming bandwidth at every join."""
+        for node in nx.topological_sort(self.graph):
+            incoming = list(self.graph.in_edges(node, data=True))
+            if incoming:
+                self.get_vnf_by_id(node).set_income_interface_bandwidth(
+                    sum(data["bandwidth"] for _, _, data in incoming)
+                )
+            for u, v, data in self.graph.out_edges(node, data=True):
+                self.link_bandwidth_dict[u, v] = data["bandwidth"]
 
     def get_all_paths(self) -> list[list[str]]:
         """Retorna todos os caminhos direcionados de src até dst no DAG."""
@@ -149,7 +143,9 @@ class SFC:
             return list(nx.all_simple_paths(self.graph, source=self.src.id, target=self.dst.id))
         return []
 
-    def get_critical_path_latency(self, path_latencies: dict[tuple[str, str], float], comp_latencies: dict[str, float]) -> float:
+    def get_critical_path_latency(
+        self, path_latencies: dict[tuple[str, str], float], comp_latencies: dict[str, float]
+    ) -> float:
         """
         Calcula a latência ponta a ponta pelo caminho mais longo (caminho crítico do DAG):
         T^{e2e} = max_{p in paths(src -> dst)} sum_{u -> v in p} (lat_comm(u, v) + lat_comp(v))
