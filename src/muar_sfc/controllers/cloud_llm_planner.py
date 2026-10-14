@@ -71,7 +71,7 @@ class CloudLLMPlanner:
         self.model_name = getattr(settings, "cognitive_llm_model", "mock")
         self.api_key = getattr(settings, "cognitive_api_key", "")
 
-        self.last_planning_time = 0.0
+        self.last_planning_time = None
         self.planning_counter = 0
         self.current_guidance = CognitiveGuidance()
 
@@ -118,18 +118,20 @@ class CloudLLMPlanner:
                 "level": level_server,
                 "cpu_util_pct": round(cpu_util * 100, 1),
                 "cache_free_mb": round(cache_free, 1),
+                "cpu_free": max(0.0, cpu_cap - cpu_used),
+                "available": cpu_cap > 0,
             }
             nodes_telemetry.append(info)
 
-            # Identifica nós com saturação crítica/proativa de processamento (limiar suave em 85%)
-            if cpu_util >= 0.85:
+            # Detecta saturação proativamente a partir de 75% de CPU.
+            if cpu_util >= 0.75 or cpu_cap <= 0:
                 high_cpu_nodes.append(node_id)
 
             # Identifica nós de borda aptos a hospedar cache regional
             is_edge = (node_type == "server_edge") or (
                 node_type == "server" and level_server != "cloud"
             )
-            if is_edge and cache_free >= 150.0 and cpu_util < 0.70:
+            if is_edge and cpu_cap > 0 and cache_free >= 150.0 and cpu_util < 0.70:
                 cache_ready_nodes.append(node_id)
 
         # Telemetria de Enlaces Críticos (Identifica pontes e gargalos de banda)
@@ -140,7 +142,9 @@ class CloudLLMPlanner:
             bw_free = max(0.0, bw_cap - bw_used)
             util = (bw_used / max(1.0, bw_cap)) * 100.0
             if util >= 75.0 or bw_free < 20.0:
-                congested_links.append({"link": [u, v], "util_pct": round(util, 1), "free_mbps": round(bw_free, 1)})
+                congested_links.append(
+                    {"link": [u, v], "util_pct": round(util, 1), "free_mbps": round(bw_free, 1)}
+                )
 
         net_cpu_pct = (total_cpu_used / total_cpu_cap * 100) if total_cpu_cap > 0 else 0.0
 
@@ -165,8 +169,8 @@ class CloudLLMPlanner:
         # Regras de Meta-Política Dinâmica Equilibrada
         if high_cpu_nodes or net_cpu_pct > 60.0:
             # Sob alta saturação: equilíbrio estrito (não abandona a latência)
-            lat_w = 0.55
-            load_w = 0.45
+            lat_w = 0.45
+            load_w = 0.55
             sync_factor = 1.15
             strategy = (
                 f"Saturação detectada em {len(high_cpu_nodes)} nós. "
@@ -201,43 +205,6 @@ class CloudLLMPlanner:
             timestamp=time.time(),
         )
 
-    def _call_gemini_api(self, telemetry: dict[str, Any]) -> CognitiveGuidance | None:
-        """Executa chamada à API Gemini com Structured Outputs para orquestração."""
-        try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=self.api_key)
-
-            prompt = (
-                "Você é o Orquestrador Cognitivo em Nuvem de uma rede 6G Metaverso/XR. "
-                "Com base na telemetria atual da infraestrutura, defina as diretrizes para "
-                "os agentes locais MAPPO alocarem SFCs em DAG com sincronização inter-modal.\n\n"
-                f"Telemetria Atual:\n{json.dumps(telemetry, indent=2)}\n\n"
-                "Emita a resposta rigorosamente no schema CognitiveGuidance."
-            )
-
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=CognitiveGuidance,
-                    temperature=0.2,
-                ),
-            )
-
-            if response.text:
-                guidance_dict = json.loads(response.text)
-                return CognitiveGuidance(**guidance_dict)
-
-        except Exception as e:
-            logger.warning(
-                f"[CloudLLMPlanner] Falha na chamada da API LLM ({e}). "
-                "Recorrendo ao motor analítico cognitivo de fallback."
-            )
-        return None
-
     def _call_openai_compatible_api(self, telemetry: dict[str, Any]) -> CognitiveGuidance | None:
         """
         Executa chamada a endpoints padrão OpenAI (Ollama, vLLM, LMStudio, Groq, OpenRouter).
@@ -246,11 +213,16 @@ class CloudLLMPlanner:
         try:
             import urllib.request
 
-            base_url = getattr(self.settings, "cognitive_api_base_url", "") or "http://localhost:11434/v1"
+            base_url = (
+                getattr(self.settings, "cognitive_api_base_url", "") or "http://localhost:11434/v1"
+            )
             endpoint = f"{base_url.rstrip('/')}/chat/completions"
 
             system_prompt = (
-                "Você é o Orquestrador Cognitivo em Nuvem de uma rede 6G Metaverso/XR. "
+                "Maximize a aceitação de SFCs preservando CPU, cache, banda e SLA de latência. "
+                "Use apenas IDs presentes na telemetria. Evitar nós é uma preferência, "
+                "não uma proibição de alocar. Priorize capacidade livre sob congestionamento. "
+                "Escreva reasoning em português. "
                 "Responda EXCLUSIVAMENTE em formato JSON com o seguinte schema:\n"
                 "{\n"
                 '  "avoid_nodes": [int],\n'
@@ -271,8 +243,8 @@ class CloudLLMPlanner:
                 ],
                 "temperature": 0.1,
             }
-            if "ollama" in base_url or "localhost" in base_url:
-                payload["response_format"] = {"type": "json_object"}
+            payload["max_tokens"] = getattr(self.settings, "cognitive_max_tokens", 1024)
+            payload["response_format"] = {"type": "json_object"}
 
             data = json.dumps(payload).encode("utf-8")
             headers = {"Content-Type": "application/json"}
@@ -280,7 +252,9 @@ class CloudLLMPlanner:
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
             req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(
+                req, timeout=getattr(self.settings, "cognitive_api_timeout", 30.0)
+            ) as response:
                 res_body = json.loads(response.read().decode("utf-8"))
                 msg = res_body["choices"][0]["message"]["content"]
                 parsed = json.loads(msg)
@@ -340,7 +314,9 @@ class CloudLLMPlanner:
         if self.model_name != "mock":
             if "gemini" in self.model_name.lower():
                 guidance = self._call_gemini_api(telemetry)
-            elif "qwen" in self.model_name.lower() or "llama" in self.model_name.lower() or api_base:
+            elif (
+                "qwen" in self.model_name.lower() or "llama" in self.model_name.lower() or api_base
+            ):
                 guidance = self._call_openai_compatible_api(telemetry)
             elif self.api_key:
                 guidance = self._call_gemini_api(telemetry)
@@ -348,8 +324,19 @@ class CloudLLMPlanner:
         if guidance is None:
             guidance = self._solve_cognitive_heuristic(telemetry)
 
+        known_nodes = {n["id"] for n in telemetry.get("nodes_telemetry", [])}
+        guidance.avoid_nodes = [n for n in guidance.avoid_nodes if n in known_nodes]
+        ready_nodes = set(telemetry.get("cache_ready_nodes", []))
+        guidance.priority_cache_nodes = [
+            n for n in guidance.priority_cache_nodes if n in ready_nodes
+        ]
+        weight_sum = guidance.latency_weight + guidance.load_balance_weight
+        if weight_sum > 0:
+            guidance.latency_weight /= weight_sum
+            guidance.load_balance_weight /= weight_sum
+        else:
+            guidance.latency_weight = guidance.load_balance_weight = 0.5
         self.current_guidance = guidance
-        self.last_planning_time = time.time()
 
         logger.info(
             f"🧠 [CloudLLMPlanner] Novas Diretrizes Emitidas (Ciclo #{self.planning_counter}): "
@@ -377,10 +364,11 @@ class CloudLLMPlanner:
             return None
 
         if (
-            self.last_planning_time == 0.0
+            self.last_planning_time is None
             or (current_time - self.last_planning_time) >= self.planner_interval
         ):
             guidance = self.generate_guidance()
+            self.last_planning_time = current_time
             self.apply_guidance_to_algorithm(algorithm)
             return guidance
 

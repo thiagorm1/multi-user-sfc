@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from muar_sfc.core.sfc import SFC
 class MAPPOAlgorithm(Algorithm):
     """
     Algoritmo de Orquestração Cloud-Edge Multi-Agente MAPPO com CTDE.
-    Executa inferência descentralizada em tempo real (< 5 ms) respeitando
+    Executa inferência cooperativa com busca limitada, respeitando
     restrições de CPU, Cache, Banda e Sincronização Inter-Modal (DAG).
     """
 
@@ -77,6 +78,7 @@ class MAPPOAlgorithm(Algorithm):
         self.latency = None
         self.fail_reason = None
         self.sync_differential = 0.0
+        self.sfc.edge_routes = {}
         return self.sfc
 
     def get_latency(self) -> float:
@@ -122,6 +124,7 @@ class MAPPOAlgorithm(Algorithm):
             if self.model_path.exists():
                 try:
                     import torch
+
                     ckpt = torch.load(self.model_path, map_location="cpu", weights_only=False)
                     if (
                         ckpt.get("obs_dim") == env.obs_dim
@@ -145,10 +148,6 @@ class MAPPOAlgorithm(Algorithm):
             return False
 
         sync_tol = getattr(self.sfc, "sync_tolerance", 5.0)
-        if self.cognitive_guidance:
-            factor = getattr(self.cognitive_guidance, "sync_tolerance_factor", 1.0)
-            sync_tol *= factor
-
         self.env = MAPPO_SFC_Env(
             graph=self.graph,
             sfc=self.sfc,
@@ -157,14 +156,36 @@ class MAPPOAlgorithm(Algorithm):
             sync_tolerance=sync_tol,
             is_training=False,
             cognitive_guidance=self.cognitive_guidance,
+            share=getattr(args, "share", False),
+            shareband=getattr(args, "shareband", False),
+            policy_weight=getattr(args, "mappo_policy_weight", 0.5),
         )
 
         self._ensure_trainer_initialized(self.env)
-        return self.algorithm(self.graph, self.sfc)
+        attempts = getattr(args, "mappo_search_attempts", 8)
+        exclusions = [{}]
+        visited = set()
+        for _ in range(attempts):
+            if not exclusions:
+                break
+            excluded = exclusions.pop(0)
+            signature = repr(sorted((v, sorted(nodes, key=str)) for v, nodes in excluded.items()))
+            if signature in visited:
+                continue
+            visited.add(signature)
+            if self.algorithm(self.graph, self.sfc, excluded):
+                return True
+            # Bounded backtracking revisits host choices without relaxing resource/SLA checks.
+            for vnf_id, node in reversed(list(self.env.allocated_nodes.items())):
+                alternative = copy.deepcopy(excluded)
+                alternative.setdefault(vnf_id, set()).add(node)
+                exclusions.append(alternative)
+        return False
 
-    def algorithm(self, substrate_network: Any, sfc: SFC) -> bool:
+    def algorithm(self, substrate_network: Any, sfc: SFC, excluded=None) -> bool:
         """Lógica principal de inferência multi-agente descentralizada."""
         obs, state = self.env.reset_sfc(sfc)
+        self.env.excluded_nodes = excluded or {}
         done = False
         step_count = 0
         max_steps = len(self.env.vnf_sequence) + 5
@@ -183,6 +204,10 @@ class MAPPOAlgorithm(Algorithm):
 
         self.route_info = self.env.route_info
         self.latency = round(self.env.total_latency, 2)
+        self.sync_differential = self.env.sync_differential
+        sfc.edge_routes = copy.deepcopy(self.env.edge_routes)
+        sfc.edge_latencies = dict(self.env.edge_latencies)
+        sfc.comp_latencies = dict(self.env.comp_latencies)
 
         if not self.check_solution():
             self.handle_failure()

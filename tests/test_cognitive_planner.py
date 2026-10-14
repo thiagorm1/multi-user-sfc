@@ -27,16 +27,31 @@ def sample_network():
 def sample_sfc():
     vnf_list = [
         {
-            "type": 2, "name": "IA_1", "CPU": 15, "cache": 0,
-            "in_bw": 50, "out_bw": 50, "latency": 2.0,
+            "type": 2,
+            "name": "IA_1",
+            "CPU": 15,
+            "cache": 0,
+            "in_bw": 50,
+            "out_bw": 50,
+            "latency": 2.0,
         },
         {
-            "type": 2, "name": "MA_1", "CPU": 10, "cache": 100,
-            "in_bw": 50, "out_bw": 50, "latency": 2.0,
+            "type": 2,
+            "name": "MA_1",
+            "CPU": 10,
+            "cache": 100,
+            "in_bw": 50,
+            "out_bw": 50,
+            "latency": 2.0,
         },
         {
-            "type": 2, "name": "RE_1", "CPU": 20, "cache": 0,
-            "in_bw": 50, "out_bw": 50, "latency": 2.0,
+            "type": 2,
+            "name": "RE_1",
+            "CPU": 20,
+            "cache": 0,
+            "in_bw": 50,
+            "out_bw": 50,
+            "latency": 2.0,
         },
     ]
     dependencies = [
@@ -97,7 +112,7 @@ def test_cognitive_heuristic_guidance(sample_network):
     assert 0.0 <= guidance.latency_weight <= 1.0
 
 
-def test_action_mask_pruning(sample_network, sample_sfc):
+def test_guidance_preserves_feasible_actions(sample_network, sample_sfc):
     env = MAPPO_SFC_Env(
         graph=sample_network.graph,
         sfc=sample_sfc,
@@ -116,14 +131,9 @@ def test_action_mask_pruning(sample_network, sample_sfc):
     env.set_cognitive_guidance(guidance)
     masks_after = env.get_action_masks()
 
-    # O nó 1 (se presente na região e com alternativas) deve ser podado
+    # Preferências do LLM não podem remover capacidade física disponível.
     for r in range(env.n_regions):
-        nodes_in_r = env.region_nodes[r]
-        if 1 in nodes_in_r:
-            idx = nodes_in_r.index(1)
-            # Se havia alternativas, o índice foi mascarado
-            if masks_before[r].sum() > 1:
-                assert masks_after[r][idx] == 0.0
+        assert (masks_before[r] == masks_after[r]).all()
 
 
 def test_dynamic_reward_shaping(sample_network, sample_sfc):
@@ -167,3 +177,122 @@ def test_mappo_algorithm_integration(sample_network, sample_sfc):
     success = alg.start_algorithm()
     assert success is True
     assert alg.get_latency() > 0.0
+
+
+def test_planner_uses_supplied_clock(sample_network):
+    planner = CloudLLMPlanner(
+        SimulationSettings(cognitive_planner=True, cognitive_planner_interval=2),
+        substrate_network=sample_network,
+    )
+    assert planner.step_planning(0) is not None
+    assert planner.step_planning(1) is None
+    assert planner.step_planning(2) is not None
+
+
+def test_qwen_request_and_validation(sample_network, monkeypatch):
+    import json
+    import urllib.request
+
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            content = json.dumps(
+                {
+                    "avoid_nodes": [2, 999],
+                    "priority_cache_nodes": [1, 999],
+                    "latency_weight": 0.2,
+                    "load_balance_weight": 0.6,
+                }
+            )
+            return json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+    def urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data)
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    planner = CloudLLMPlanner(
+        SimulationSettings(cognitive_llm_model="qwen2.5:1.5b"),
+        sample_network,
+    )
+    guidance = planner.generate_guidance()
+    assert captured["payload"]["model"] == "qwen2.5:1.5b"
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert captured["url"].endswith("/v1/chat/completions")
+    assert guidance.avoid_nodes == [2]
+    assert guidance.priority_cache_nodes == [1]
+    assert guidance.latency_weight + guidance.load_balance_weight == pytest.approx(1)
+
+
+def test_qwen_failure_uses_heuristic(sample_network, monkeypatch):
+    import urllib.request
+
+    def unavailable(*args, **kwargs):
+        raise TimeoutError("unavailable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
+    planner = CloudLLMPlanner(
+        SimulationSettings(cognitive_llm_model="qwen2.5:1.5b"),
+        sample_network,
+    )
+    assert "Ciclo Cognitivo" in planner.generate_guidance().reasoning
+
+
+def test_no_capacity_rejects_without_forcing_cloud(sample_network, sample_sfc):
+    for _, data in sample_network.graph.nodes(data=True):
+        data["cpu_capacity"] = 0
+    env = MAPPO_SFC_Env(sample_network.graph, sample_sfc, n_regions=2)
+    env.reset_sfc(sample_sfc)
+    assert all(not mask.any() for mask in env.get_action_masks().values())
+    _, _, _, done, info = env.step({0: env.max_nodes_per_region})
+    assert done and info["success"] is False
+    assert all(data["cpu_used"] == 0 for _, data in env.graph.nodes(data=True))
+
+
+def test_inference_finds_alternative_to_infeasible_proposal(sample_network, sample_sfc):
+    sample_network.graph.nodes[0]["cpu_capacity"] = 0
+    env = MAPPO_SFC_Env(sample_network.graph, sample_sfc, n_regions=2)
+    env.reset_sfc(sample_sfc)
+    _, _, _, done, info = env.step({0: env.max_nodes_per_region})
+    assert not done
+    assert info["allocated_node"] != 0
+
+
+def test_disconnected_destination_is_rejected(sample_network, sample_sfc):
+    env = MAPPO_SFC_Env(sample_network.graph, sample_sfc, n_regions=2)
+    env.reset_sfc(sample_sfc)
+    for u, v in list(env.graph.edges(env.dst_node)):
+        env.graph.remove_edge(u, v)
+    first = env.vnf_sequence[0]
+    env.allocated_nodes[first.id] = env.src_node
+    env.route_info[first.id] = [env.src_node]
+    env._finalize_chain()
+    assert not env.success
+    assert "destino" in env.fail_reason
+
+
+def test_cloud_without_bandwidth_is_masked(sample_network, sample_sfc):
+    for u, v in sample_network.graph.edges():
+        sample_network.graph.edges[u, v]["bandwidth_used"] = 1000
+    env = MAPPO_SFC_Env(sample_network.graph, sample_sfc, n_regions=2)
+    env.reset_sfc(sample_sfc)
+    assert all(mask[env.max_nodes_per_region] == 0 for mask in env.get_action_masks().values())
+
+
+def test_final_route_without_bandwidth_is_rejected(sample_network, sample_sfc):
+    env = MAPPO_SFC_Env(sample_network.graph, sample_sfc, n_regions=2)
+    env.reset_sfc(sample_sfc)
+    for u, v in env.graph.edges():
+        env.graph.edges[u, v]["bandwidth_used"] = 1000
+    env._finalize_chain()
+    assert not env.success
+    assert "banda" in env.fail_reason

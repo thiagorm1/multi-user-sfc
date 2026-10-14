@@ -1,3 +1,5 @@
+import copy
+import math
 from typing import Any
 
 import networkx as nx
@@ -6,8 +8,14 @@ import numpy as np
 from muar_sfc.algorithms.mappo.partitioner import RegionalTopologyPartitioner
 from muar_sfc.algorithms.networkUtils import (
     calculate_latency_betwen_nodes,
-    get_available_shortest_path_fast,
-    get_k_available_shortest_paths,
+)
+from muar_sfc.core.orchestration.placement import (
+    available_path,
+    bandwidth_demand,
+    node_demand,
+    reserve_bandwidth,
+    reserve_node,
+    stream_key,
 )
 from muar_sfc.core.sfc import SFC, VNF
 
@@ -51,6 +59,13 @@ class MAPPO_SFC_Env:
         sync_tolerance: float = 5.0,
         is_training: bool = False,
         cognitive_guidance: Any = None,
+        share: bool = False,
+        shareband: bool = False,
+        policy_weight: float = 0.5,
+        proposal_only: bool = False,
+        destination_weight: float = 0.25,
+        load_balance_scale: float = 10.0,
+        cache_preference_weight: float = 0.0,
     ):
         if isinstance(graph, nx.Graph):
             self.base_graph = graph
@@ -58,13 +73,20 @@ class MAPPO_SFC_Env:
             self.base_graph = graph.graph
         else:
             self.base_graph = graph
-        self.graph = self.base_graph.copy()
+        self.graph = copy.deepcopy(self.base_graph)
         self.sfc = sfc
         self.n_regions = n_regions
         self.cloud_node = cloud_node
         self.sync_tolerance = sync_tolerance
         self.is_training = is_training
         self.cognitive_guidance = cognitive_guidance
+        self.share = share
+        self.shareband = shareband
+        self.policy_weight = policy_weight
+        self.proposal_only = proposal_only
+        self.destination_weight = destination_weight
+        self.load_balance_scale = load_balance_scale
+        self.cache_preference_weight = cache_preference_weight
 
         self.partitioner = RegionalTopologyPartitioner(
             self.graph, n_regions=n_regions, cloud_node=cloud_node
@@ -115,7 +137,7 @@ class MAPPO_SFC_Env:
     def reset_sfc(self, sfc: SFC):
         """Reinicia o ambiente para uma nova SFC."""
         self.sfc = sfc
-        self.graph = self.base_graph.copy()
+        self.graph = copy.deepcopy(self.base_graph)
         self.current_vnf_idx = 0
         self.allocated_nodes = {}
         self.route_info = {}
@@ -135,7 +157,14 @@ class MAPPO_SFC_Env:
         except Exception:
             self.dst_node = 0
 
+        self.edge_routes = {}
+        self.edge_latencies = {}
+        self.finish_times = {"src": 0.0}
+        self.comp_latencies = {}
+        self.sync_differential = 0.0
+        self.excluded_nodes = {}
         self.current_location = self.src_node
+        self.lat_max = float(self.sfc.get_latency_request() or 50.0)
 
         # Define a sequência de VNFs para alocação (ordem topológica para DAGs)
         self.vnf_sequence = self._extract_vnf_sequence(sfc)
@@ -157,77 +186,79 @@ class MAPPO_SFC_Env:
         """Atualiza dinamicamente as diretrizes cognitivas do CloudLLMPlanner."""
         self.cognitive_guidance = guidance
 
+    def _copy_trial(self):
+        graph = self.graph.copy()
+        for _, data in graph.nodes(data=True):
+            data["services"] = dict(data.get("services", {}))
+        for _, _, data in graph.edges(data=True):
+            data["services_in_transit"] = dict(data.get("services_in_transit", {}))
+        return graph
+
+    def _route_inputs(self, graph, vnf_id, node):
+        routes, latencies, arrivals = {}, {}, []
+        for predecessor in self.sfc.graph.predecessors(vnf_id):
+            start = self.src_node if predecessor == "src" else self.allocated_nodes[predecessor]
+            bw = self.sfc.graph.edges[predecessor, vnf_id]["bandwidth"]
+            key = stream_key(self.sfc, predecessor, vnf_id, self.shareband)
+            path = available_path(graph, start, node, bw, key, self.shareband)
+            if not path:
+                raise ValueError("Sem rota com banda suficiente para uma dependência.")
+            sender = copy.copy(self.sfc.get_vnf_by_id(predecessor))
+            sender.set_outcome_interface_bandwidth(bw)
+            latency = 0.0
+            for u, v in zip(path[:-1], path[1:], strict=True):
+                reserve_bandwidth(graph.edges[u, v], key, bw, self.shareband)
+                latency += calculate_latency_betwen_nodes(graph, u, v, sender)
+            dependency = (predecessor, vnf_id)
+            routes[dependency] = path
+            latencies[dependency] = latency
+            arrivals.append(self.finish_times[predecessor] + latency)
+        differential = max(arrivals, default=0) - min(arrivals, default=0)
+        if len(arrivals) > 1 and differential > self.sync_tolerance:
+            raise ValueError("Sincronização inter-modal excedeu o SLA.")
+        return routes, latencies, max(arrivals, default=0), differential
+
+    def _candidate(self, node):
+        vnf = self.vnf_sequence[self.current_vnf_idx]
+        if node not in self.graph or node in self.excluded_nodes.get(vnf.id, set()):
+            return None
+        trial = self._copy_trial()
+        try:
+            cpu, cache = reserve_node(trial, self.sfc, vnf, node, self.share)
+            routes, latencies, start, differential = self._route_inputs(trial, vnf.id, node)
+        except ValueError:
+            return None
+        comp = safe_comp_latency(trial, node, vnf)
+        finish = start + comp
+        if not math.isfinite(finish) or finish > self.lat_max:
+            return None
+        # Do not choose a host that cannot reach the destination with residual bandwidth.
+        if "dst" in self.sfc.graph.successors(vnf.id):
+            bw = self.sfc.graph.edges[vnf.id, "dst"]["bandwidth"]
+            key = stream_key(self.sfc, vnf.id, "dst", self.shareband)
+            if not available_path(trial, node, self.dst_node, bw, key, self.shareband):
+                return None
+        return trial, routes, latencies, comp, finish, differential, cpu, cache
+
     def get_action_masks(self) -> dict[int, np.ndarray]:
-        """
-        Gera máscara booleana/binária de ações válidas para cada agente k.
-        1 se o nó tem capacidade de CPU/Cache para a VNF atual e link viável, 0 caso contrário.
-        Aplica Poda de Ações Cognitiva (Action Mask Pruning) baseada em avoid_nodes do LLM.
-        """
-        masks = {}
         if self.current_vnf_idx >= len(self.vnf_sequence):
-            for r in range(self.n_regions):
-                masks[r] = np.ones(self.action_dim_per_agent, dtype=np.float32)
-            return masks
-
-        curr_vnf = self.vnf_sequence[self.current_vnf_idx]
-        cpu_req = curr_vnf.get_cpu_request()
-        cache_req = curr_vnf.get_cache_request()
-        bw_req = curr_vnf.get_outcome_interface_bandwidth()
-
-        avoid_nodes = set(getattr(self.cognitive_guidance, "avoid_nodes", []) or [])
-
-        for r in range(self.n_regions):
-            mask = np.zeros(self.action_dim_per_agent, dtype=np.float32)
-            nodes = self.region_nodes[r]
-
-            for idx, node in enumerate(nodes):
-                node_data = self.graph.nodes[node]
-                cpu_free = (
-                    node_data.get("cpu_capacity", 0.0) - node_data.get("cpu_used", 0.0)
-                )
-                cache_free = (
-                    node_data.get("cache_capacity", 0.0) - node_data.get("cache_used", 0.0)
-                )
-
-                if cpu_free >= cpu_req and cache_free >= cache_req:
-                    # Se for o mesmo nó atual ou possuir conectividade direta / alternativa
-                    if node == self.current_location:
-                        mask[idx] = 1.0
-                    else:
-                        path = get_available_shortest_path_fast(
-                            self.graph, self.current_location, node, bw_req
-                        )
-                        if not path:
-                            alt = get_k_available_shortest_paths(
-                                self.graph, self.current_location, node, bw_req, k=2
-                            )
-                            if alt:
-                                path = alt[0]
-                        if path:
-                            mask[idx] = 1.0
-
-            # Ação de Nuvem (sempre válida como fallback seguro de capacidade)
-            cloud_idx = self.max_nodes_per_region
-            mask[cloud_idx] = 1.0
-
-            # Poda Cognitiva de Ação (Action Mask Pruning via LLM Guidance):
-            # Só mascara o nó se ele estiver criticamente saturado (CPU >= 85%)
-            # e desde que reste ao menos 1 candidato viável na região.
-            if avoid_nodes:
-                for idx, node in enumerate(nodes):
-                    if node in avoid_nodes and mask[idx] == 1.0 and mask.sum() > 1:
-                        data_n = self.graph.nodes[node]
-                        u = data_n.get("cpu_used", 0.0) / max(1.0, data_n.get("cpu_capacity", 1.0))
-                        if u >= 0.85:
-                            mask[idx] = 0.0
-
-            # Se todos os nós locais forem inválidos, a nuvem absorve
-            if mask.sum() == 0:
-                mask[cloud_idx] = 1.0
-
-            masks[r] = mask
-
-        return masks
+            return {
+                r: np.ones(self.action_dim_per_agent, dtype=np.float32)
+                for r in range(self.n_regions)
+            }
+        feasible = {
+            n: self._candidate(n) is not None
+            for n in {self.cloud_node, *(n for nodes in self.region_nodes.values() for n in nodes)}
+        }
+        return {
+            r: np.array(
+                [float(feasible[n]) for n in self.region_nodes[r]]
+                + [0.0] * (self.max_nodes_per_region - len(self.region_nodes[r]))
+                + [float(feasible[self.cloud_node])],
+                dtype=np.float32,
+            )
+            for r in range(self.n_regions)
+        }
 
     def get_observations(self) -> dict[int, np.ndarray]:
         """Gera o vetor de observação local o_t^k para cada agente k."""
@@ -265,15 +296,25 @@ class MAPPO_SFC_Env:
 
                 # Média de banda livre dos links conectados
                 incident_edges = list(self.graph.edges(node, data=True))
-                if incident_edges:
-                    bw_free = float(np.mean([
-                        max(
-                            0.0,
-                            float(d.get("bandwidth_capacity") or 1000.0)
-                            - float(d.get("bandwidth_used", 0.0)),
+                if any(
+                    math.isfinite(d.get("bandwidth_capacity", 0)) for _, _, d in incident_edges
+                ):
+                    bw_free = (
+                        float(
+                            np.mean(
+                                [
+                                    max(
+                                        0.0,
+                                        float(d.get("bandwidth_capacity") or 1000.0)
+                                        - float(d.get("bandwidth_used", 0.0)),
+                                    )
+                                    for _, _, d in incident_edges
+                                    if math.isfinite(d.get("bandwidth_capacity", 0))
+                                ]
+                            )
                         )
-                        for _, _, d in incident_edges
-                    ])) / 1000.0
+                        / 1000.0
+                    )
                 else:
                     bw_free = 0.0
 
@@ -290,7 +331,9 @@ class MAPPO_SFC_Env:
 
             obs[r] = np.nan_to_num(
                 np.concatenate([node_feats.flatten(), vnf_feats]).astype(np.float32),
-                nan=0.0, posinf=1.0, neginf=0.0
+                nan=0.0,
+                posinf=1.0,
+                neginf=0.0,
             )
 
         return obs
@@ -312,161 +355,132 @@ class MAPPO_SFC_Env:
         lb_t = float(np.std(cpu_utils)) if cpu_utils else 0.0
 
         # Estatísticas globais
-        global_stats = np.array([
-            mean_cpu,
-            lb_t,
-            self.total_latency / self.lat_max,
-            self.current_vnf_idx / max(1, len(self.vnf_sequence)),
-        ], dtype=np.float32)
+        global_stats = np.array(
+            [
+                mean_cpu,
+                lb_t,
+                self.total_latency / self.lat_max,
+                self.current_vnf_idx / max(1, len(self.vnf_sequence)),
+            ],
+            dtype=np.float32,
+        )
 
         return np.nan_to_num(
             np.concatenate([all_obs_concat, global_stats]).astype(np.float32),
-            nan=0.0, posinf=1.0, neginf=0.0
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
         )
 
-    def step(
-        self, actions: dict[int, int]
-    ) -> tuple[dict[int, np.ndarray], np.ndarray, float, bool, dict[str, Any]]:
-        """
-        Executa um passo de decisão multi-agente cooperativo.
-
-        Cada agente k propõe um nó candidato de sua região (ou Cloud).
-        O orquestrador seleciona a melhor proposta com base na proximidade e custo total,
-        aloca os recursos e avança na cadeia.
-        """
+    def step(self, actions):
         if self.current_vnf_idx >= len(self.vnf_sequence):
-            return self.get_observations(), self.get_global_state(), 0.0, True, {"success": True}
-
-        curr_vnf = self.vnf_sequence[self.current_vnf_idx]
-        cpu_req = curr_vnf.get_cpu_request()
-        cache_req = curr_vnf.get_cache_request()
-        bw_req = curr_vnf.get_outcome_interface_bandwidth()
-
-        # Coleta os nós candidatos propostos por cada agente
-        candidates = []
-        for r, act in actions.items():
-            if act == self.max_nodes_per_region:
-                node = self.cloud_node
-            else:
-                nodes_in_reg = self.region_nodes[r]
-                node = nodes_in_reg[act] if act < len(nodes_in_reg) else self.cloud_node
-            candidates.append(node)
-
-        # Avalia os candidatos e escolhe o de menor custo (latência acumulada + uso)
-        best_node = None
+            return (
+                self.get_observations(),
+                self.get_global_state(),
+                0.0,
+                True,
+                {"success": self.success},
+            )
+        vnf = self.vnf_sequence[self.current_vnf_idx]
+        proposals = set()
+        for region, action in actions.items():
+            if action == self.max_nodes_per_region:
+                proposals.add(self.cloud_node)
+            elif 0 <= action < len(self.region_nodes[region]):
+                proposals.add(self.region_nodes[region][action])
+        candidates = (
+            proposals
+            if self.is_training or self.proposal_only
+            else {self.cloud_node, *(n for nodes in self.region_nodes.values() for n in nodes)}
+        )
+        best = None
         best_cost = float("inf")
-        best_path = None
-
-        for cand in candidates:
-            # Verifica recursos
-            data = self.graph.nodes[cand]
-            cpu_free = data.get("cpu_capacity", 0.0) - data.get("cpu_used", 0.0)
-            cache_free = data.get("cache_capacity", 0.0) - data.get("cache_used", 0.0)
-
-            if cand != self.cloud_node and (cpu_free < cpu_req or cache_free < cache_req):
+        for node in sorted(candidates, key=str):
+            result = self._candidate(node)
+            if result is None:
                 continue
-
-            # Se for o mesmo nó físico da VNF anterior, caminho é local (0 saltos de rede)
-            if self.current_location == cand:
-                path = [cand]
-            else:
-                # Tenta caminho mais rápido direto com poda de Dijkstra
-                path = get_available_shortest_path_fast(
-                    self.graph, self.current_location, cand, bw_req
+            trial, routes, latencies, comp, finish, differential, cpu, cache = result
+            data = trial.nodes[node]
+            cpu_util = data.get("cpu_used", 0) / max(1.0, data.get("cpu_capacity", 0))
+            cache_util = data.get("cache_used", 0) / max(1.0, data.get("cache_capacity", 0))
+            lat_weight = getattr(self.cognitive_guidance, "latency_weight", 0.5)
+            load_weight = getattr(self.cognitive_guidance, "load_balance_weight", 0.5)
+            reused = node_demand(self.graph, self.sfc, vnf, node, self.share) == (0, 0)
+            avoid = node in (getattr(self.cognitive_guidance, "avoid_nodes", []) or [])
+            reserved = sum(
+                bandwidth_demand(
+                    self.graph.edges[u, v],
+                    stream_key(self.sfc, *dep, self.shareband),
+                    self.sfc.graph.edges[dep]["bandwidth"],
+                    self.shareband,
                 )
-                # Se o caminho direto estiver sem banda, busca até 3 rotas alternativas (K-shortest paths)
-                if not path:
-                    alt_paths = get_k_available_shortest_paths(
-                        self.graph, self.current_location, cand, bw_req, k=3
-                    )
-                    if alt_paths:
-                        path = alt_paths[0]
-
-            if not path and self.current_location != cand:
+                for dep, path in routes.items()
+                for u, v in zip(path[:-1], path[1:], strict=True)
+            )
+            try:
+                destination_distance = nx.shortest_path_length(
+                    trial, node, self.dst_node, weight="latency"
+                )
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
                 continue
-
-            comp_lat = safe_comp_latency(self.graph, cand, curr_vnf)
-            comm_lat = sum(
-                calculate_latency_betwen_nodes(self.graph, path[i], path[i + 1], curr_vnf)
-                for i in range(len(path) - 1)
-            ) if path else 0.0
-
-            step_lat = comp_lat + comm_lat
-
-            w_lat = 0.5
-            w_lb = 0.5
-            if self.cognitive_guidance is not None:
-                w_lat = float(getattr(self.cognitive_guidance, "latency_weight", 0.5))
-                w_lb = float(getattr(self.cognitive_guidance, "load_balance_weight", 0.5))
-
-            cpu_util = data.get("cpu_used", 0.0) / max(1.0, data.get("cpu_capacity", 1.0))
-            avoid_nodes_list = getattr(self.cognitive_guidance, "avoid_nodes", []) or []
-            
-            # Penalidade suave proporcional à saturação quadrática em vez de binária rígida
-            avoid_penalty = (12.0 * (cpu_util ** 2)) if (cand in avoid_nodes_list) else 0.0
-
-            # Custo WAN explícito se for Cloud (prioriza esgotar a borda antes da nuvem)
-            cloud_cost = 25.0 if (cand == self.cloud_node) else 0.0
-
-            # Bonificação de co-locação agressiva: consolida VNFs no mesmo nó físico (elimina com_lat e poupa links)
-            colocation_bonus = 12.0 if (cand == self.current_location and cand != self.cloud_node) else 0.0
-
-            cost = (w_lat * step_lat) + (w_lb * cpu_util * 20.0) + avoid_penalty + cloud_cost - colocation_bonus
-
+            cost = (
+                lat_weight * (finish + self.destination_weight * destination_distance)
+                + load_weight * (cpu_util + cache_util) * self.load_balance_scale
+                + reserved / 1000
+                + differential
+                + float(avoid) * cpu_util * 4
+                - self.cache_preference_weight
+                * float(
+                    vnf.get_cache_request() > 0
+                    and node
+                    in (getattr(self.cognitive_guidance, "priority_cache_nodes", []) or [])
+                )
+                - float(reused) * 4
+                - float(node in proposals) * self.policy_weight
+            )
             if cost < best_cost:
                 best_cost = cost
-                best_node = cand
-                best_path = path or [cand]
-
-        if best_node is None:
-            # Fallback forçado para Cloud se nenhum candidato de borda suportar
-            best_node = self.cloud_node
-            best_path = nx.shortest_path(
-                self.graph, source=self.current_location, target=self.cloud_node, weight="latency"
+                best = node, result
+        if best is None:
+            self.success = False
+            self.fail_reason = "Sem alocação viável para recursos, rotas ou SLA."
+            return (
+                self.get_observations(),
+                self.get_global_state(),
+                -30.0,
+                True,
+                {"success": False, "fail_reason": self.fail_reason},
             )
-
-        # Deduz recursos no grafo
-        node_data = self.graph.nodes[best_node]
-        node_data["cpu_used"] = node_data.get("cpu_used", 0.0) + cpu_req
-        node_data["cache_used"] = node_data.get("cache_used", 0.0) + cache_req
-
-        if best_path and len(best_path) > 1:
-            for u, v in zip(best_path[:-1], best_path[1:], strict=False):
-                self.graph.edges[u, v]["bandwidth_used"] = (
-                    self.graph.edges[u, v].get("bandwidth_used", 0.0) + bw_req
-                )
-
-        # Registra alocação
-        self.allocated_nodes[curr_vnf.id] = best_node
-        self.route_info[curr_vnf.id] = list(reversed(best_path)) if best_path else [best_node]
-
-        # Calcula latência do passo
-        comp_lat = safe_comp_latency(self.graph, best_node, curr_vnf)
-        comm_lat = sum(
-            calculate_latency_betwen_nodes(self.graph, best_path[i], best_path[i + 1], curr_vnf)
-            for i in range(len(best_path) - 1)
-        ) if best_path else 0.0
-        self.total_latency += comp_lat + comm_lat
-
-        self.current_location = best_node
+        node, result = best
+        (self.graph, routes, latencies, comp, finish, differential, _, _) = result
+        self.edge_routes.update(routes)
+        self.edge_latencies.update(latencies)
+        self.comp_latencies[vnf.id] = comp
+        self.finish_times[vnf.id] = finish
+        self.sync_differential = max(self.sync_differential, differential)
+        self.allocated_nodes[vnf.id] = node
+        self.route_info[vnf.id] = list(reversed(next(iter(routes.values()), [node])))
+        self.total_latency = max(self.finish_times.values())
+        self.current_location = node
         self.current_vnf_idx += 1
-
-        done = self.current_vnf_idx >= len(self.vnf_sequence)
-        reward = self._compute_reward(done)
-
-        info = {
-            "allocated_node": best_node,
-            "step_latency": comp_lat + comm_lat,
-            "total_latency": self.total_latency,
-        }
-
+        done = self.current_vnf_idx == len(self.vnf_sequence)
         if done:
             self._finalize_chain()
-            info["success"] = self.success
-            info["route_info"] = self.route_info
-            info["latency"] = self.total_latency
-
-        return self.get_observations(), self.get_global_state(), reward, done, info
+        reward = self._compute_reward(done)
+        return (
+            self.get_observations(),
+            self.get_global_state(),
+            reward,
+            done,
+            {
+                "allocated_node": node,
+                "success": self.success if done else False,
+                "total_latency": self.total_latency,
+                "latency": self.total_latency,
+                "route_info": self.route_info,
+                "sync_differential": self.sync_differential,
+            },
+        )
 
     def _compute_reward(self, done: bool) -> float:
         """
@@ -511,36 +525,31 @@ class MAPPO_SFC_Env:
             if self.total_latency > lat_req:
                 reward -= 15.0
             else:
-                reward += 25.0  # Bônus de cumprimento de SLA
+                reward += 30.0 if self.success else -30.0
 
         return float(reward)
 
     def _finalize_chain(self):
-        """Conecta o último hop ao nó de destino e calcula caminho crítico em DAGs."""
-        # Caminho final da última VNF ao destino
+        """Reserve all terminal dependencies and measure the DAG critical path."""
+        trial = self._copy_trial()
         try:
-            path_to_dst = nx.shortest_path(
-                self.graph, source=self.current_location, target=self.dst_node, weight="latency"
+            routes, latencies, finish, differential = self._route_inputs(
+                trial, "dst", self.dst_node
             )
-            self.route_info["dst"] = path_to_dst
-            for i in range(len(path_to_dst) - 1):
-                edge_data = self.graph.edges[path_to_dst[i], path_to_dst[i + 1]]
-                self.total_latency += edge_data.get("latency", 1.0)
-        except Exception:
-            self.route_info["dst"] = [self.dst_node]
-
-        # Caminho da origem para a primeira VNF
-        try:
-            first_vnf = self.vnf_sequence[0]
-            first_node = self.allocated_nodes[first_vnf.id]
-            path_from_src = nx.shortest_path(
-                self.graph, source=self.src_node, target=first_node, weight="latency"
+        except (ValueError, KeyError):
+            self.success = False
+            self.fail_reason = (
+                "Sem rota com banda suficiente até o destino ou sincronização inválida."
             )
-            self.route_info["src"] = path_from_src
-            for i in range(len(path_from_src) - 1):
-                edge_data = self.graph.edges[path_from_src[i], path_from_src[i + 1]]
-                self.total_latency += edge_data.get("latency", 1.0)
-        except Exception:
-            self.route_info["src"] = [self.src_node]
-
-        self.success = True
+            return
+        self.graph = trial
+        self.edge_routes.update(routes)
+        self.edge_latencies.update(latencies)
+        self.finish_times["dst"] = finish
+        self.total_latency = finish
+        self.sync_differential = max(self.sync_differential, differential)
+        self.route_info["src"] = [self.src_node]
+        self.route_info["dst"] = [self.dst_node]
+        self.success = finish <= self.lat_max
+        if not self.success:
+            self.fail_reason = "Latência do caminho crítico excedeu o SLA."
