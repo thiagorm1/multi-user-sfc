@@ -45,9 +45,18 @@ teste.csv
 .env
 .env.*
 !.env.example
+!.env.qwen.example
+!.env.high-acceptance.example
 
 # --- Cobertura de Testes ---
 .coverage
 coverage.xml
 htmlcov/
 .tox/
+!.env.muvr-reference.example
+
+!.env.mappo-qwen-muvr.example
+
+# Artefatos locais de análise e renderização
+tmp/
+output/
