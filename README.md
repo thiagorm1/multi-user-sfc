@@ -293,13 +293,42 @@ sementes 42, 43 e 44 do benchmark; não se treina o Qwen. Checkpoints incompatí
 ou sem registro de atualizações MAPPO geram erro, em vez de inferência aleatória.
 
 Na inferência, **somente hosts propostos pelos atores** podem ser escolhidos. A primeira
-busca é determinística; até oito buscas internas revisitam escolhas com ações
+busca é determinística; buscas internas revisitam escolhas com ações
 amostradas das distribuições treinadas e máscaras de ação. A semente é fixa por
 sessão e jogador. Essas buscas não representam espera ou novas tentativas de admissão.
+O padrão permite até 16 tentativas por jogador: mantém as oito tentativas da busca
+original e, se necessário, explora alternativas que preservam o prefixo de funções
+já alocadas, com exclusões cumulativas de hosts. Essa etapa adicional pode aumentar
+o tempo de decisão. Estados de exclusão duplicados não consomem o orçamento de
+tentativas. Cada jogador registra
+`search_diagnostics`: tentativa, função onde falhou, quantidade de funções alocadas,
+motivo e ausência de ações viáveis na máscara daquele ramo. Uma máscara vazia em um
+ramo explorado não prova que todas as alocações possíveis sejam inviáveis.
 Não existe resgate pela heurística conjunta. A observação inclui velocidade de
 processamento e distância ao destino; a máscara considera um limite otimista
 de latência restante, sem relaxar o SLA. O nó global compartilhado continua sendo
 um servidor de borda finito, sem adicionar capacidade de nuvem.
+
+O treinamento inclui cargas de até 85% e gargalos correlacionados de CPU, memória
+ou banda, sem alterar capacidades. Após atualizações MAPPO, avalia candidatos a
+cada 50 episódios e ao final; salva o primeiro com maior aceitação em 30 cenários
+de validação. Outros 30 cenários separados medem o resultado final, sem escolher
+o checkpoint. Os metadados distinguem o total de atualizações executadas das
+atualizações do checkpoint selecionado. Essa seleção e diversidade de treinamento
+precisam ser avaliadas por experimentos pareados; não garantem maior aceitação.
+
+O checkpoint experimental local `rl_saved_models/MAPPO_muvr_generalization_v2.pt`
+usa esse treino e não substitui automaticamente um modelo anterior.
+Para avaliá-lo com Qwen e a nova busca, execute:
+
+```bash
+python scripts/run_mappo_qwen.py --config config/mappo_qwen_generalization_v2.toml
+```
+
+A configuração v2 usa `stage = "evaluate"` e um diretório próprio de resultados.
+O analisador agrupa os diagnósticos das rejeições cujo limite inferior de latência
+não excede o SLA; arquivos antigos permanecem legíveis, com diagnósticos indisponíveis
+identificados explicitamente.
 
 O Qwen recebe uma cópia da telemetria e produz orientações em um worker de
 segundo plano. A admissão **não espera o LLM**: o MAPPO usa a última orientação

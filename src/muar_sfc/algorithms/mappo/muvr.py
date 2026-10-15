@@ -429,17 +429,23 @@ class TrainedMUVRMAPPO:
 
     def _search_policy(self, graph, sfc):
         exclusions = [{}]
+        prefix_exclusions = []
         visited = set()
         decisions = []
         last_env = None
-        for attempt in range(self.settings.mappo_search_attempts):
-            if not exclusions:
+        search_summary = []
+        baseline_budget = min(8, self.settings.mappo_search_attempts)
+        while len(search_summary) < self.settings.mappo_search_attempts:
+            use_prefix = len(search_summary) >= baseline_budget or not exclusions
+            queue = prefix_exclusions if use_prefix else exclusions
+            if not queue:
                 break
-            excluded = exclusions.pop(0)
+            excluded = queue.pop(0)
             signature = repr(sorted((name, sorted(nodes)) for name, nodes in excluded.items()))
             if signature in visited:
                 continue
             visited.add(signature)
+            attempt = len(search_summary)
             env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
             if dimensions(env) != self.checkpoint_dimensions:
                 raise ValueError("MAPPO checkpoint dimensions do not match this topology")
@@ -448,22 +454,53 @@ class TrainedMUVRMAPPO:
             done = False
             while not done:
                 masks = env.get_action_masks()
+                feasible_actions = {region: int(mask.sum()) for region, mask in masks.items()}
                 actions, log_probs = self.trainer.select_actions(
                     obs, masks, deterministic=attempt == 0
                 )
                 obs, _, _, done, _ = env.step(actions)
                 env.actor_decisions[-1]["action_log_probabilities"] = log_probs
+                env.actor_decisions[-1]["feasible_actions_per_actor"] = feasible_actions
             for record in env.actor_decisions:
                 record["search_attempt"] = attempt + 1
                 record["deterministic"] = attempt == 0
             decisions.extend(env.actor_decisions)
             last_env = env
+            search_summary.append(
+                {
+                    "attempt": attempt + 1,
+                    "strategy": "fixed_prefix" if use_prefix else "original",
+                    "success": bool(env.success),
+                    "allocated_functions": len(env.allocated_nodes),
+                    "failed_vnf": None if env.success else env.actor_decisions[-1]["vnf"],
+                    "failure_reason": env.fail_reason,
+                    "no_feasible_masked_action": not any(feasible_actions.values()),
+                }
+            )
+            env.search_summary = search_summary
             if env.success:
                 return env, decisions
-            for name, node in reversed(list(env.allocated_nodes.items())):
+            # Keep the successful prefix fixed, then forbid its next chosen host.
+            # Actors still propose every host; no heuristic host is injected.
+            allocated = list(env.allocated_nodes.items())
+            alternatives = []
+            for index in reversed(range(len(allocated))):
+                name, node = allocated[index]
                 alternative = copy.deepcopy(excluded)
+                for prefix_name, prefix_node in allocated[:index]:
+                    alternative[prefix_name] = set(graph) - {prefix_node}
                 alternative.setdefault(name, set()).add(node)
-                exclusions.append(alternative)
+                if set(graph) - alternative[name]:
+                    alternatives.append(alternative)
+            if use_prefix:
+                prefix_exclusions = alternatives + prefix_exclusions
+            else:
+                prefix_exclusions.extend(alternatives)
+                # Preserve the original proposal sequence before trying new branches.
+                for name, node in reversed(allocated):
+                    alternative = copy.deepcopy(excluded)
+                    alternative.setdefault(name, set()).add(node)
+                    exclusions.append(alternative)
         return last_env, decisions
 
     def __call__(self, net, batch, _strategy):
@@ -477,7 +514,7 @@ class TrainedMUVRMAPPO:
             self.guidance_applied_requests += self.guidance is not None
             self.guidance_misses += self.guidance is None
         trial = copy.deepcopy(net)
-        latencies, decisions = [], []
+        latencies, decisions, searches = [], [], []
         for player_index, original in enumerate(batch):
             sfc = copy.deepcopy(original)
             torch.manual_seed(
@@ -485,6 +522,7 @@ class TrainedMUVRMAPPO:
             )
             env, trace = self._search_policy(trial.graph, sfc)
             decisions.extend(trace)
+            searches.append({"player_index": player_index, "attempts": env.search_summary})
             if not env.success:
                 self.request_evidence.append(
                     {
@@ -493,6 +531,7 @@ class TrainedMUVRMAPPO:
                         "guidance_used": self.guidance is not None,
                         "guidance_cycle": len(self.planning_records),
                         "actor_decisions": decisions,
+                        "search_diagnostics": searches,
                         "accepted": False,
                     }
                 )
@@ -509,6 +548,7 @@ class TrainedMUVRMAPPO:
                 "guidance_used": self.guidance is not None,
                 "guidance_cycle": len(self.planning_records),
                 "actor_decisions": decisions,
+                "search_diagnostics": searches,
                 "accepted": True,
             }
         )
@@ -522,6 +562,7 @@ class TrainedMUVRMAPPO:
             "policy_candidates_only": True,
             "max_internal_search_attempts": self.settings.mappo_search_attempts,
             "search_sampling": "first deterministic, alternatives from trained distributions",
+            "search_branching": "original_first_8_then_fixed_prefix_host_exclusions",
             "qwen_enabled": self.qwen,
             "planning_mode": "background_nonblocking",
             "guidance_applied_requests": self.guidance_applied_requests,

@@ -56,7 +56,7 @@ class SimulationSettings(BaseSettings):
     wireless_capacity_factor: float = Field(default=1.0, ge=1)
     source_bandwidth_mbps: float = Field(default=0.0, ge=0)
     mappo_policy_weight: float = Field(default=0.5, ge=0)
-    mappo_search_attempts: int = Field(default=8, ge=1)
+    mappo_search_attempts: int = Field(default=16, ge=1)
     seed: int = 42
 
     # --- Parâmetros do Orquestrador Cognitivo (Cloud LLM Planner) ---

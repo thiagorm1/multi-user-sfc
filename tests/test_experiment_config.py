@@ -58,6 +58,7 @@ def test_hyperparameters_are_forwarded_and_stage_controls_execution():
         {"evaluation": {"seed_count": 0}},
         {"qwen": {"model": "mock"}},
         {"evaluation": {"seed_start": 900000}},
+        {"evaluation": {"seed_start": 800000}},
     ],
 )
 def test_invalid_or_leaking_configuration_is_rejected(data):

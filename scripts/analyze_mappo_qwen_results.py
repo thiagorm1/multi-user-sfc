@@ -45,6 +45,7 @@ def main():
     assert model_hash == training["checkpoint_sha256"]
     decisions, response, latency, cpu, per_seed = [], [], [], [], []
     reason_counts = Counter()
+    unresolved_search_failures = Counter()
     actor_decisions = 0
     impossible, potential = 0, 0
     for row in rows:
@@ -81,6 +82,19 @@ def main():
                     impossible += 1
                 else:
                     potential += 1
+                    searches = evidence.get("search_diagnostics", [])
+                    attempts = searches[-1]["attempts"] if searches else []
+                    if attempts:
+                        last = attempts[-1]
+                        category = (
+                            "no_feasible_action_in_explored_branch"
+                            if last["no_feasible_masked_action"]
+                            else "proposal_or_finalization_failure"
+                        )
+                        unresolved_search_failures[category] += 1
+                        unresolved_search_failures[f"failed_vnf:{last['failed_vnf']}"] += 1
+                    else:
+                        unresolved_search_failures["diagnostics_unavailable"] += 1
             for decision in evidence["actor_decisions"]:
                 assert (
                     decision["selected_host"] is None
@@ -146,6 +160,7 @@ def main():
         "rejection_reasons": dict(reason_counts),
         "rejected_with_physical_latency_lower_bound_above_sla": impossible,
         "rejected_not_excluded_by_latency_lower_bound": potential,
+        "unresolved_rejection_search_diagnostics": dict(unresolved_search_failures),
         "optimistic_latency_ceiling_percent": 100 * (total - impossible) / total,
         "actor_decisions_audited": actor_decisions,
         "model_sha256": model_hash,
@@ -245,7 +260,14 @@ def main():
         "",
         f"Rejeições: {impossible} com limite inferior físico de latência acima do SLA ou sem caminho; {potential} não excluídas por esse limite. Estas últimas não são necessariamente recuperáveis: o limite ignora ocupação e restrições adicionais. Teto otimista de latência: {result['optimistic_latency_ceiling_percent']:.2f}%, não uma promessa de aceitação.",
         "",
-        "O conjunto isolado de 30 casos de treinamento permaneceu em 86,67% antes e depois. A avaliação completa confirmou execução do checkpoint treinado, mas não demonstra um ganho isolado de treinamento.",
+        f"Teste separado: {training['held_out_single_player_count']} casos, "
+        f"{training['held_out_before_percent']:.2f}% antes e "
+        f"{training['held_out_after_MAPPO_percent']:.2f}% após MAPPO. "
+        "Esse teste isolado não demonstra um ganho na admissão de sessões completas.",
+        "",
+        "Diagnósticos das rejeições não excluídas pelo limite inferior: "
+        + json.dumps(dict(unresolved_search_failures), ensure_ascii=False)
+        + ". Falta de ação viável em um ramo não comprova inviabilidade global.",
         "",
         "Somente MAPPO + Qwen foi avaliado nas 33 sementes. Sem ablação pareada de MAPPO sozinho, não é possível atribuir ao Qwen o aumento de aceitação comparado a experimentos menores ou comprovar superioridade sobre MuSFiCO. O objetivo de 98%-100% não foi atingido na média.",
         "",

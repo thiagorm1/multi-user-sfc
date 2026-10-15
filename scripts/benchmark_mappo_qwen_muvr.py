@@ -29,7 +29,7 @@ def main(argv=None):
     parser.add_argument("--api-timeout", type=float, default=120)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--guidance-max-age", type=float, default=120)
-    parser.add_argument("--search-attempts", type=int, default=8)
+    parser.add_argument("--search-attempts", type=int, default=16)
     args = parser.parse_args(argv)
     torch.set_num_threads(args.threads)
     args.output.mkdir(parents=True, exist_ok=True)

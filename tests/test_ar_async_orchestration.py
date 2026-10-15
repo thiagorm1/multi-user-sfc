@@ -34,7 +34,7 @@ def adapter():
     a.guidance_applied_requests = a.guidance_misses = a.background_skipped_busy = 0
     a.closed = False
     a.call_results, a.planning_records, a.request_evidence = [], [], []
-    a._search_policy = lambda graph, sfc: (SimpleNamespace(success=False), [])
+    a._search_policy = lambda graph, sfc: (SimpleNamespace(success=False, search_summary=[]), [])
     yield a
     a.close()
 

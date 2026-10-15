@@ -34,7 +34,7 @@ cloning_batch_size = 128 # Tamanho do lote de demonstrações.
 requests = 300      # Requisições por semente, não simultâneas.
 seed_start = 42
 seed_count = 33     # 42 até 74: 33 execuções e 9.900 requisições.
-search_attempts = 8 # Máximo de tentativas internas da política por jogador.
+search_attempts = 16 # Até 8 tentativas originais + busca adicional com prefixo fixo.
 
 [qwen]
 # Qwen é pré-treinado: usado via Ollama, sem treinamento do LLM aqui.

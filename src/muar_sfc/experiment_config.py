@@ -41,7 +41,7 @@ class Evaluation(Section):
     requests: int = Field(default=300, ge=1)
     seed_start: int = Field(default=42, ge=0)
     seed_count: int = Field(default=33, ge=1)
-    search_attempts: int = Field(default=8, ge=1)
+    search_attempts: int = Field(default=16, ge=1)
 
     @property
     def seeds(self):
@@ -80,6 +80,7 @@ class ExperimentConfig(Section):
                 (200000 + t.seed, 200000 + t.seed),
                 (200000 + t.seed * 1000, 200000 + t.seed * 1000 + t.demonstrations - 1),
                 (500000 + t.seed * 1000, 500000 + t.seed * 1000 + t.episodes - 1),
+                (800000, 800029),
                 (900000, 900029),
             ]
             start = self.evaluation.seed_start
