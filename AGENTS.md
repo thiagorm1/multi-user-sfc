@@ -350,18 +350,107 @@ pois várias dessas pastas são ignoradas pelo Git. Não fabricar dados faltante
 6. Em relatórios, renderizar/verificar todas as páginas e explicitar população,
    modo Qwen, unidades, período de medição e condições dos comparadores.
 
-### Orquestrador dos agentes de desenvolvimento
+### 9.1. Configuração e modelos dos agentes
 
-O modelo definido pelo usuário para o papel de **orquestrador (Maestro)** é
-**GLM 5.3 Flash Free**. Ele coordena o planejamento, a distribuição de tarefas e
-a integração dos resultados dos agentes de desenvolvimento. Essa definição não
-altera o Qwen nem os atores MAPPO usados pelo simulador.
+A configuração do OpenCode está em [opencode.json](opencode.json). O agente
+principal é `maestro`; `pesquisador`, `codex` e `validador` são subagentes.
+Todos devem ler este guia antes de trabalhar. A configuração carrega `AGENTS.md`
+explicitamente e foi estruturada conforme o schema consultado em 21/10/2026:
+`agents`, `system`, `mode` e `permissions`.
 
-Não presumir que contas de nuvem, credenciais ou APIs desse modelo já estejam
-configuradas. Os quatro atores MAPPO são agentes do algoritmo, não agentes de
-programação. Delegação entre agentes de desenvolvimento só deve ocorrer quando
-explicitamente solicitada ou quando houver uma instrução aplicável que a exija;
-não confundir essa organização com a arquitetura executada pelo simulador.
+| Papel | Agente | Modelo/identificador configurado | Responsabilidade principal |
+|---|---|---|---|
+| Orquestrador | `maestro` | **GLM 5.3 Flash Free**, designação do usuário; ID `zhipu/glm-5.3` | Planejar, delegar, revisar e consolidar a entrega |
+| Pesquisador | `pesquisador` | `deepseek/deepseek-v4.1-flash-1017` | Fontes primárias, equações e rastreabilidade das premissas |
+| Programador | `codex` | `openai/gpt-6.1-sol` | Código de produção Python, configuração e integração técnica |
+| Validador | `validador` | `deepseek/deepseek-v4.1-flash-1017` | Testes, auditoria, estatística, gráficos e relatórios |
+
+Os IDs foram mantidos como fornecidos pelo usuário. A designação “Free” não
+comprova gratuidade desse ID: disponibilidade, autenticação e cobrança devem ser
+conferidas no provedor configurado. Não há credenciais neste arquivo nem garantia
+de que esses modelos estejam acessíveis em toda instalação. Não substituir por
+outro modelo, nem por uma rota paga, silenciosamente. O schema oficial está em
+<https://opencode.ai/config.json>; instalações antigas podem exigir outro formato.
+
+Essa organização é dos **agentes de desenvolvimento**. Não altera o Qwen usado
+pelo simulador nem os quatro atores MAPPO. Não há implantação de um Maestro em
+nuvem efetuada apenas por criar a configuração.
+
+### 9.2. Maestro: planejamento e integração de resultados
+
+- Ler a solicitação, este guia e os arquivos relevantes; preservar autorizações
+  já dadas sem repetir perguntas desnecessárias.
+- Decompor o trabalho em tarefas com entradas, arquivos-alvo, restrições,
+  dependências e evidências esperadas de conclusão.
+- Acionar pesquisador quando houver dúvida metodológica ou bibliográfica; Codex
+  para implementação; validador para QA e análise dos resultados.
+- Não escrever nem editar código, testes, relatórios ou configurações diretamente.
+  As permissões do Maestro bloqueiam edição e shell; a integração material das
+  mudanças é delegada ao Codex ou, nos artefatos de validação, ao validador.
+- Conferir consistência das entregas, encaminhar correções e apresentar a síntese
+  final ao usuário em português. Não declarar conclusão com validação pendente.
+- Delegar apenas aos três papéis configurados, evitando conflitos de escrita.
+  Não acionar todos os agentes por rotina quando a tarefa dispensa algum papel.
+
+### 9.3. Pesquisador: evidências e decisões metodológicas
+
+- Consultar MuSFiCO e AI-native cloud-edge, suas fontes primárias e documentação
+  técnica relevante para DAG, MEC, MAPPO, recursos e orientação LLM.
+- Extrair equações, unidades, hipóteses e condições de avaliação, com DOI/URL e
+  seção/tabela quando disponível.
+- Distinguir `[ARTIGO]`, `[ASSUMIDO NO SIMULADOR]`, `[MEDIDO]` e `[PROPOSTA]`;
+  apontar discrepâncias com a implementação e dados ainda necessários.
+- Entregar parecer ao Maestro, sem editar arquivos nem executar shell. Sugerir o
+  conteúdo de registros de premissas para implementação pelo Codex.
+- Não apresentar TopoRAG, confiança aprendida ou ajuste do LLM como implementados
+  sem verificação; não inventar fórmulas nem completar valores ausentes por conta.
+
+### 9.4. Codex: implementação e integração técnica
+
+- Trabalhar em `src/muar_sfc/`, `config/` e `scripts/` no escopo recebido. O foco é
+  Python, NetworkX e PyTorch; não há código ns-3/O-RAN a implementar neste fluxo.
+- Preservar recursos finitos, máscaras, reservas atômicas, reuso e liberação,
+  dimensões dos atores e validade dos checkpoints.
+- Implementar otimizações com isolamento e invalidação corretos, parâmetros
+  rastreáveis e proteção de saídas.
+- Aplicar alterações materiais solicitadas pelo Maestro e corrigir problemas
+  reproduzíveis apontados pelo validador, sem afrouxar verificações para passar.
+- Entregar arquivos alterados, motivo técnico, verificações feitas e limitações.
+  Treino, campanhas, inferência real e operações Git seguem a autorização do
+  usuário, não uma autorização implícita do papel.
+
+### 9.5. Validador: QA, análise e apresentação dos resultados
+
+- Criar testes relevantes em `tests/`, scripts de auditoria e artefatos de análise.
+  Pode produzir gráficos e relatórios; não alterar produção para mascarar falhas.
+- Conferir recursos, rollback, reuso, caches, checkpoint, parâmetros, hashes,
+  cobertura das sementes e correspondência das requisições.
+- Comparar os mesmos perfis/sementes e distinguir replay de inferência ao vivo,
+  medições locais de números publicados e amostra de ajuste de avaliação.
+- Usar sementes como unidades para diferenças pareadas; informar aceitação, CPU
+  global e concentração por nó, banda no tempo, latência das aceitas e decisão
+  com média, p95, p99 e máximo.
+- Inspecionar gráficos e renderizar PDFs. Não gerar curvas ausentes nem inferir
+  conforto visual, energia ou ganho causal do Qwen sem medição correspondente.
+- Entregar aprovado/reprovado, comandos, evidências e limitações ao Maestro;
+  encaminhar falhas de produção ao Codex para correção.
+
+### 9.6. Contrato de delegação e critérios de conclusão
+
+1. **Maestro → especialista:** objetivo, entradas/fontes, arquivos permitidos,
+   restrições, o que foi autorizado executar e critérios de conclusão.
+2. **Pesquisa → Maestro → Codex:** parecer rastreável, premissas e propostas.
+3. **Codex → Maestro → validador:** mudanças, justificativa e roteiro de verificação.
+4. **Validador → Maestro:** aprovação ou falha reproduzível, métricas e artefatos.
+   Falhas retornam ao Codex até resolução ou identificação de bloqueio real.
+5. **Maestro → usuário:** resultado, caminhos dos arquivos, testes efetivamente
+   executados, limitações e próximos passos estritamente necessários.
+
+Não delegar a mesma escrita simultaneamente a dois agentes. Tarefas independentes
+podem ocorrer em paralelo sob coordenação. Os subagentes não lançam outros
+subagentes; reportam ao Maestro. A implementação dessa configuração não dispara
+tarefas nem chamadas de API por si só. Ao usar o Maestro, a delegação pertinente
+faz parte do fluxo, mas nunca amplia a autorização para campanhas ou operações Git.
 
 ## 10. Referências complementares
 
