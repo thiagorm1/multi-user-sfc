@@ -1,0 +1,2 @@
+# Relatórios devem ser tratados como arquivos binários.
+*.pdf binary
