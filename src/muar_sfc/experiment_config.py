@@ -42,6 +42,7 @@ class Evaluation(Section):
     seed_start: int = Field(default=42, ge=0)
     seed_count: int = Field(default=33, ge=1)
     search_attempts: int = Field(default=16, ge=1)
+    load_balance_scale: float = Field(default=2.0, ge=0)
 
     @property
     def seeds(self):
@@ -128,6 +129,8 @@ def command_plan(config, root, python):
                 str(execution.threads),
                 "--search-attempts",
                 str(e.search_attempts),
+                "--load-balance-scale",
+                str(e.load_balance_scale),
                 "--qwen-model",
                 q.model,
                 "--api-base-url",

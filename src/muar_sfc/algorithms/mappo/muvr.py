@@ -447,6 +447,7 @@ class TrainedMUVRMAPPO:
             visited.add(signature)
             attempt = len(search_summary)
             env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
+            env.load_balance_scale = getattr(self.settings, "mappo_load_balance_scale", 2.0)
             if dimensions(env) != self.checkpoint_dimensions:
                 raise ValueError("MAPPO checkpoint dimensions do not match this topology")
             obs = env.get_observations()
@@ -561,6 +562,7 @@ class TrainedMUVRMAPPO:
             "checkpoint_dimensions": self.checkpoint_dimensions,
             "policy_candidates_only": True,
             "max_internal_search_attempts": self.settings.mappo_search_attempts,
+            "load_balance_scale": self.settings.mappo_load_balance_scale,
             "search_sampling": "first deterministic, alternatives from trained distributions",
             "search_branching": "original_first_8_then_fixed_prefix_host_exclusions",
             "qwen_enabled": self.qwen,

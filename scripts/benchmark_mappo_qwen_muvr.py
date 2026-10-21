@@ -30,6 +30,7 @@ def main(argv=None):
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--guidance-max-age", type=float, default=120)
     parser.add_argument("--search-attempts", type=int, default=16)
+    parser.add_argument("--load-balance-scale", type=float, default=2.0)
     args = parser.parse_args(argv)
     torch.set_num_threads(args.threads)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -52,6 +53,7 @@ def main(argv=None):
         cognitive_planner_interval=args.planner_interval,
         cognitive_guidance_max_age=args.guidance_max_age,
         mappo_search_attempts=args.search_attempts,
+        mappo_load_balance_scale=args.load_balance_scale,
     )
     for variant in args.variants:
         document = {

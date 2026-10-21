@@ -36,6 +36,10 @@ seed_start = 42
 seed_count = 33     # 42 até 74: 33 execuções e 9.900 requisições.
 search_attempts = 16 # Até 8 tentativas originais + busca adicional com prefixo fixo.
 
+# Peso da penalidade de concentração de CPU/memória no ranking (referência: 2.0).
+# Zero remove essa penalidade do ranking; limites físicos e SLA continuam obrigatórios.
+load_balance_scale = 0.0
+
 [qwen]
 # Qwen é pré-treinado: usado via Ollama, sem treinamento do LLM aqui.
 model = "qwen2.5:1.5b"
