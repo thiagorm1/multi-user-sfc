@@ -445,3 +445,143 @@ Para repetir um experimento, prefira novos `model_path` e `output_dir`.
 Não há retomada automática: `overwrite = true` autoriza reiniciar e substituir.
 A configuração é validada antes de executar, incluindo valores inválidos,
 chaves desconhecidas e sobreposição entre sementes de treino e avaliação.
+
+
+### Medição e otimização do tempo de decisão
+
+O ambiente MAPPO reutiliza candidatos entre a máscara e o ranking na mesma etapa.
+O cache é invalidado ao mudar o grafo planejado, a função ou as exclusões de hosts,
+e é reconstruído no reset. Distâncias de propagação são calculadas uma vez por
+origem durante a tentativa; rotas com banda residual continuam sendo verificadas
+no estado da etapa. Observações são extraídas uma vez por transição e reutilizadas
+para formar o estado global.
+
+As tentativas em grafos físicos simples usam cópia sob escrita: apenas os atributos
+do host e dos enlaces reservados são destacados antes da alteração. O ambiente
+não modifica a topologia durante uma tentativa. Grafos direcionados ou multigrafos
+mantêm a cópia profunda. CPU, memória, banda, sincronização e SLA continuam sendo
+verificados. Checkpoints existentes mantêm as mesmas dimensões de entrada e saída;
+não é necessário retreinar para usar essa otimização.
+
+Para medir média, p95, p99 e máximo em três sementes pareadas:
+
+```bash
+.venv/bin/python scripts/benchmark_decision_latency.py \
+  --baseline-ref fda4e87 \
+  --model rl_saved_models/MAPPO_muvr_meu_treino.pt \
+  --requests 50 --seeds 42 43 44 --threads 4 \
+  --output results/comparacao_tempo_decisao
+```
+
+Use uma pasta de saída nova. O benchmark não treina o modelo. Ele executa a
+implementação anterior e a atual, com e sem Qwen. A condição
+`optimized_ollama_load` gera consultas reais mas descarta suas orientações: assim
+podemos observar a disputa de CPU sem alterar o ranking por recomendação do LLM.
+`--variants` permite selecionar condições específicas.
+
+No Linux, amostras de `/proc` a cada 0,5 s registram CPU do controlador, processos
+Ollama e ocupação total da máquina. CPU de processo pode superar 100%: cada 100%
+equivale a um núcleo lógico ocupado. A medição de CPU inclui o encerramento do
+worker; tempos por decisão excluem essa espera final. O benchmark registra também
+tempo de CPU da thread de decisão, permitindo distinguir trabalho da thread de
+parte da espera/escalonamento. As amostras não medem diretamente largura de banda
+de memória ou pressão de cache. Consulte `summary.json`, `manifest.json` e os traces
+por condição. A disponibilidade assíncrona da orientação pode mudar as escolhas do
+Qwen quando a política fica mais rápida; compare essa condição separadamente da
+equivalência da política sem Qwen.
+
+### Tradeoff de balanceamento para aceitação
+
+Em `[evaluation]` de `config/mappo_qwen.toml`, `load_balance_scale = 0.0`
+remove a parcela explícita de penalidade por concentração de CPU/memória no
+ranking do MUVR MAPPO. A seleção pode concentrar funções em hosts próximos,
+sempre sujeita às mesmas máscaras e limites físicos. O ajuste anterior era `1.0`;
+a referência original `2.0` continua disponível para comparação.
+O parâmetro é usado apenas para ordenar os hosts propostos pelos atores; não
+altera suas máscaras, pesos treinados, orçamento de busca, recursos dos nós,
+reuso, sincronização ou SLA de 6 ms. O peso efetivo da parcela continua sendo
+multiplicado por `load_balance_weight` da orientação Qwen, quando disponível.
+
+A configuração principal e o exemplo `.env.mappo-qwen-muvr.example` ativam o
+tradeoff. Configurações que omitem a opção conservam a referência 2.0 para
+compatibilidade. Na CLI de avaliação, use `--load-balance-scale 0.0`; por variável
+de ambiente, `MUAR_MAPPO_LOAD_BALANCE_SCALE=0.0`. Não é necessário retreinar.
+
+Para comparar pesos sem confundir o resultado com a disponibilidade assíncrona
+ou com diferentes respostas do LLM:
+
+```bash
+.venv/bin/python scripts/benchmark_load_tradeoff.py \
+  --guidance-source results/otimizacao_decisao/comparacao_3_sementes_50/optimized_qwen.json \
+  --scales 2.0 1.0 0.75 0.5 0.25 0.0 \
+  --output results/comparacao_tradeoff_cpu
+```
+
+Esse ensaio **reproduz orientações reais já registradas**, por requisição. Não
+faz novas chamadas Qwen. Usa o mesmo checkpoint, topologias, carga e orçamento
+de busca; o peso 2.0 precisa reproduzir a aceitação da fonte. O resumo inclui
+aceitação por semente, CPU média global, CPU p95/p99/máxima por nó, desequilíbrio,
+latência e caudas do tempo de decisão. CPU nessa análise é a dos servidores
+simulados, não a CPU do computador que executa Ollama. A validação com o LLM ao
+vivo deve ser registrada separadamente. Ganhos em três sementes são exploratórios
+e ainda precisam de confirmação em uma avaliação maior e sementes independentes.
+
+
+No ensaio controlado de maior concentração (três sementes, 50 requisições cada),
+reduzir de 1.0 para 0.0 elevou a aceitação de 126/150 para 130/150. A CPU global
+média passou de 4,184% para 4,254%; o pico de CPU por nó passou de 65,93% para 80%.
+Isso representa maior concentração, não ampliação de capacidade. Pesos 0.75, 0.5
+e 0.25 não melhoraram a aceitação em relação a 1.0. Os resultados são preliminares
+e não garantem o mesmo ganho em outras sementes ou em 300 requisições. O Qwen
+continua orientando latência e preferências de hosts; com peso zero, seu peso de
+balanceamento não contribui para essa parcela específica do ranking. O treino
+MAPPO e os demais termos do custo permanecem os mesmos.
+
+
+### Saída protegida da comparação de tradeoff
+
+`--output` é um prefixo. Cada execução de `benchmark_load_tradeoff.py` cria uma
+pasta exclusiva com data/hora, por exemplo
+`results/tradeoff_33_sementes_300_20261015_143000_123456`. O caminho efetivo é
+mostrado no terminal e registrado no manifesto. Se houver colisão de nomes,
+é acrescentado um sufixo numérico por criação atômica do diretório.
+
+Todos os arquivos são criados em modo exclusivo; nenhum resultado existente é
+substituído. Cada semente concluída é gravada uma única vez em
+`seeds/scale_1/seed_42.json`, por exemplo. Ao concluir um peso, são criados
+`scale_1.json` e `summary_scale_1.json`. `summary.json` só é criado quando todos
+os pesos terminam. Se houver interrupção, os arquivos das sementes já concluídas
+permanecem disponíveis. Reexecutar cria outra pasta e começa um experimento novo;
+ainda não há retomada automática das sementes anteriores.
+
+Comando para comparar os dois pesos nas 33 sementes e 300 requisições da fonte:
+
+```bash
+.venv/bin/python -u scripts/benchmark_load_tradeoff.py \
+  --guidance-source results/meu_treino_33_sementes_300/mappo_qwen.json \
+  --model rl_saved_models/MAPPO_muvr_meu_treino.pt \
+  --scales 1.0 0.0 --threads 4 \
+  --output results/tradeoff_33_sementes_300
+```
+
+O arquivo de origem e o checkpoint são apenas lidos. Para analisar os resultados,
+use a pasta com data/hora que foi mostrada no início da execução.
+
+
+Para repetir a comparação com **33 sementes e 50 requisições por peso**, use a
+mesma fonte de 300 requisições e acrescente `--requests 50`. São utilizadas as
+primeiras 50 requisições e as orientações correspondentes de cada semente. O
+fingerprint da carga é recalculado para o prefixo e conferido com a execução;
+os arquivos de origem não são alterados. As 33 sementes vêm da fonte indicada.
+
+```bash
+.venv/bin/python -u scripts/benchmark_load_tradeoff.py \
+  --guidance-source results/meu_treino_33_sementes_300/mappo_qwen.json \
+  --model rl_saved_models/MAPPO_muvr_meu_treino.pt \
+  --requests 50 --scales 1.0 0.0 --threads 4 \
+  --output results/tradeoff_33_sementes_50
+```
+
+Total: 3.300 requisições nos dois pesos. Não há retreinamento nem novas chamadas
+Qwen. A saída continua em uma pasta exclusiva com data/hora. Omitir `--requests`
+preserva o comportamento anterior de avaliar toda a carga da fonte.
