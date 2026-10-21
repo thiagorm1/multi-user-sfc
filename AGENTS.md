@@ -350,7 +350,14 @@ pois várias dessas pastas são ignoradas pelo Git. Não fabricar dados faltante
 6. Em relatórios, renderizar/verificar todas as páginas e explicitar população,
    modo Qwen, unidades, período de medição e condições dos comparadores.
 
-Não presumir que há um Maestro externo, contas de nuvem ou APIs específicas
+### Orquestrador dos agentes de desenvolvimento
+
+O modelo definido pelo usuário para o papel de **orquestrador (Maestro)** é
+**GLM 5.3 Flash Free**. Ele coordena o planejamento, a distribuição de tarefas e
+a integração dos resultados dos agentes de desenvolvimento. Essa definição não
+altera o Qwen nem os atores MAPPO usados pelo simulador.
+
+Não presumir que contas de nuvem, credenciais ou APIs desse modelo já estejam
 configuradas. Os quatro atores MAPPO são agentes do algoritmo, não agentes de
 programação. Delegação entre agentes de desenvolvimento só deve ocorrer quando
 explicitamente solicitada ou quando houver uma instrução aplicável que a exija;
