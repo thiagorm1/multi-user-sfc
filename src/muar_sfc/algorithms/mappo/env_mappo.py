@@ -137,6 +137,9 @@ class MAPPO_SFC_Env:
     def reset_sfc(self, sfc: SFC):
         """Reinicia o ambiente para uma nova SFC."""
         self.sfc = sfc
+        self._candidate_cache = {}
+        self._candidate_token = None
+        self._distance_cache = {}
         self.graph = copy.deepcopy(self.base_graph)
         self.current_vnf_idx = 0
         self.allocated_nodes = {}
@@ -168,7 +171,7 @@ class MAPPO_SFC_Env:
 
         # Define a sequência de VNFs para alocação (ordem topológica para DAGs)
         self.vnf_sequence = self._extract_vnf_sequence(sfc)
-        return self.get_observations(), self.get_global_state()
+        return self._observation_state()
 
     def _extract_vnf_sequence(self, sfc: SFC) -> list[VNF]:
         """Extrai as VNFs intermediárias em ordem topológica ou linear."""
@@ -187,12 +190,68 @@ class MAPPO_SFC_Env:
         self.cognitive_guidance = guidance
 
     def _copy_trial(self):
-        graph = self.graph.copy()
-        for _, data in graph.nodes(data=True):
-            data["services"] = dict(data.get("services", {}))
-        for _, _, data in graph.edges(data=True):
-            data["services_in_transit"] = dict(data.get("services_in_transit", {}))
+        # Only the touched host/links are detached before reservation. Topology
+        # remains immutable during a placement step; no active resource is edited.
+        if self.graph.is_directed() or self.graph.is_multigraph():
+            return copy.deepcopy(self.graph)
+        graph = nx.Graph()
+        graph.graph = self.graph.graph.copy()
+        graph._node = self.graph._node.copy()
+        graph._adj = self.graph._adj.copy()
+        graph._trial_nodes = set()
+        graph._trial_edges = set()
+        graph._trial_adjacency = set()
         return graph
+
+    @staticmethod
+    def _detach_node(graph, node):
+        if not hasattr(graph, "_trial_nodes") or node in graph._trial_nodes:
+            return
+        data = graph._node[node].copy()
+        data["services"] = dict(data.get("services", {}))
+        graph._node[node] = data
+        graph._trial_nodes.add(node)
+
+    @staticmethod
+    def _detach_edge(graph, u, v):
+        if not hasattr(graph, "_trial_edges"):
+            return
+        key = frozenset((u, v))
+        if key in graph._trial_edges:
+            return
+        for node in (u, v):
+            if node not in graph._trial_adjacency:
+                graph._adj[node] = graph._adj[node].copy()
+                graph._trial_adjacency.add(node)
+        data = graph._adj[u][v].copy()
+        data["services_in_transit"] = dict(data.get("services_in_transit", {}))
+        graph._adj[u][v] = graph._adj[v][u] = data
+        graph._trial_edges.add(key)
+
+    def _evaluated_candidate(self, node):
+        vnf = self.vnf_sequence[self.current_vnf_idx]
+        token = (
+            id(self.graph),
+            self.current_vnf_idx,
+            frozenset(self.excluded_nodes.get(vnf.id, ())),
+        )
+        if token != self._candidate_token:
+            self._candidate_token = token
+            self._candidate_cache = {}
+        if node not in self._candidate_cache:
+            self._candidate_cache[node] = self._candidate(node)
+        return self._candidate_cache[node]
+
+    def _latency_distances(self, source):
+        if source not in self._distance_cache:
+            self._distance_cache[source] = nx.single_source_dijkstra_path_length(
+                self.base_graph, source, weight="latency"
+            )
+        return self._distance_cache[source]
+
+    def _observation_state(self):
+        obs = self.get_observations()
+        return obs, self.get_global_state(obs)
 
     def _route_inputs(self, graph, vnf_id, node):
         routes, latencies, arrivals = {}, {}, []
@@ -207,6 +266,7 @@ class MAPPO_SFC_Env:
             sender.set_outcome_interface_bandwidth(bw)
             latency = 0.0
             for u, v in zip(path[:-1], path[1:], strict=True):
+                self._detach_edge(graph, u, v)
                 reserve_bandwidth(graph.edges[u, v], key, bw, self.shareband)
                 latency += calculate_latency_betwen_nodes(graph, u, v, sender)
             dependency = (predecessor, vnf_id)
@@ -224,6 +284,7 @@ class MAPPO_SFC_Env:
             return None
         trial = self._copy_trial()
         try:
+            self._detach_node(trial, node)
             cpu, cache = reserve_node(trial, self.sfc, vnf, node, self.share)
             routes, latencies, start, differential = self._route_inputs(trial, vnf.id, node)
         except ValueError:
@@ -247,7 +308,7 @@ class MAPPO_SFC_Env:
                 for r in range(self.n_regions)
             }
         feasible = {
-            n: self._candidate(n) is not None
+            n: self._evaluated_candidate(n) is not None
             for n in {self.cloud_node, *(n for nodes in self.region_nodes.values() for n in nodes)}
         }
         return {
@@ -263,6 +324,7 @@ class MAPPO_SFC_Env:
     def get_observations(self) -> dict[int, np.ndarray]:
         """Gera o vetor de observação local o_t^k para cada agente k."""
         obs = {}
+        distances = self._latency_distances(self.current_location)
         if self.current_vnf_idx < len(self.vnf_sequence):
             curr_vnf = self.vnf_sequence[self.current_vnf_idx]
             cpu_req = curr_vnf.get_cpu_request() / 100.0
@@ -320,9 +382,7 @@ class MAPPO_SFC_Env:
 
                 # Latência estimada da localização atual até este nó
                 try:
-                    lat = nx.shortest_path_length(
-                        self.graph, source=self.current_location, target=node, weight="latency"
-                    )
+                    lat = distances.get(node, float("inf"))
                     lat_norm = min(1.0, lat / self.lat_max)
                 except Exception:
                     lat_norm = 1.0
@@ -338,9 +398,10 @@ class MAPPO_SFC_Env:
 
         return obs
 
-    def get_global_state(self) -> np.ndarray:
+    def get_global_state(self, obs=None) -> np.ndarray:
         """Gera o estado centralizado s_t com Load Imbalance LB_t para o Crítico Central."""
-        obs = self.get_observations()
+        if obs is None:
+            obs = self.get_observations()
         all_obs_concat = np.concatenate([obs[r] for r in range(self.n_regions)])
 
         # Cálculo do Load Imbalance (LB)
@@ -374,9 +435,10 @@ class MAPPO_SFC_Env:
 
     def step(self, actions):
         if self.current_vnf_idx >= len(self.vnf_sequence):
+            obs, state = self._observation_state()
             return (
-                self.get_observations(),
-                self.get_global_state(),
+                obs,
+                state,
                 0.0,
                 True,
                 {"success": self.success},
@@ -396,7 +458,7 @@ class MAPPO_SFC_Env:
         best = None
         best_cost = float("inf")
         for node in sorted(candidates, key=str):
-            result = self._candidate(node)
+            result = self._evaluated_candidate(node)
             if result is None:
                 continue
             trial, routes, latencies, comp, finish, differential, cpu, cache = result
@@ -418,8 +480,8 @@ class MAPPO_SFC_Env:
                 for u, v in zip(path[:-1], path[1:], strict=True)
             )
             try:
-                destination_distance = nx.shortest_path_length(
-                    trial, node, self.dst_node, weight="latency"
+                destination_distance = self._latency_distances(node).get(
+                    self.dst_node, float("inf")
                 )
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 continue
@@ -444,9 +506,10 @@ class MAPPO_SFC_Env:
         if best is None:
             self.success = False
             self.fail_reason = "Sem alocação viável para recursos, rotas ou SLA."
+            obs, state = self._observation_state()
             return (
-                self.get_observations(),
-                self.get_global_state(),
+                obs,
+                state,
                 -30.0,
                 True,
                 {"success": False, "fail_reason": self.fail_reason},
@@ -467,9 +530,10 @@ class MAPPO_SFC_Env:
         if done:
             self._finalize_chain()
         reward = self._compute_reward(done)
+        obs, state = self._observation_state()
         return (
-            self.get_observations(),
-            self.get_global_state(),
+            obs,
+            state,
             reward,
             done,
             {

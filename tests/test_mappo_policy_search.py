@@ -20,6 +20,9 @@ def test_search_changes_failed_branch_and_preserves_prefix(monkeypatch):
         def reset_sfc(self, sfc):
             return {}, None
 
+        def get_observations(self):
+            return {}
+
         def get_action_masks(self):
             name = "abc"[len(self.allocated_nodes)]
             feasible = [node not in self.excluded_nodes.get(name, set()) for node in self.graph]

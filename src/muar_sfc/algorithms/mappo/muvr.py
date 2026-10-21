@@ -22,7 +22,7 @@ class MUVRMAPPOEnv(MAPPO_SFC_Env):
     def __init__(self, graph, sfc, n_regions=4, guidance=None):
         # ER has no spatial coordinates. Remove the placeholder positions only
         # in the observation graph so all regions have a stable six-server shape.
-        observation_graph = copy.deepcopy(graph)
+        observation_graph = graph.copy()
         for _, data in observation_graph.nodes(data=True):
             data.pop("position", None)
         super().__init__(
@@ -85,8 +85,8 @@ class MUVRMAPPOEnv(MAPPO_SFC_Env):
         max_ips = max(data.get("ips", 0) for _, data in self.graph.nodes(data=True)) or 1
         cloud = self.graph.nodes[self.cloud_node]
         try:
-            source_distance = nx.shortest_path_length(
-                self.graph, self.current_location, self.cloud_node, weight="latency"
+            source_distance = self._latency_distances(self.current_location).get(
+                self.cloud_node, self.lat_max
             )
         except nx.NetworkXNoPath:
             source_distance = self.lat_max
@@ -143,7 +143,7 @@ class MUVRMAPPOEnv(MAPPO_SFC_Env):
                 actual_action = self.max_nodes_per_region if node == self.cloud_node else action
                 if not masks[region][actual_action]:
                     continue
-                candidate = self._candidate(node)
+                candidate = self._evaluated_candidate(node)
                 reused = node_demand(self.graph, self.sfc, vnf, node, True) == (0, 0)
                 score = (
                     candidate[4]
@@ -449,7 +449,7 @@ class TrainedMUVRMAPPO:
             env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
             if dimensions(env) != self.checkpoint_dimensions:
                 raise ValueError("MAPPO checkpoint dimensions do not match this topology")
-            obs, _ = env.reset_sfc(sfc)
+            obs = env.get_observations()
             env.excluded_nodes = excluded
             done = False
             while not done:
