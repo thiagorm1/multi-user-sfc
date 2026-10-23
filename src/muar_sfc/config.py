@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,6 +60,13 @@ class SimulationSettings(BaseSettings):
     mappo_search_attempts: int = Field(default=16, ge=1)
     mappo_load_balance_scale: float = Field(default=2.0, ge=0, allow_inf_nan=False)
     seed: int = 42
+    toporag_enabled: bool = False
+    toporag_top_k: int = Field(default=4, ge=1)
+    toporag_kappa: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
+    toporag_confidence_mode: Literal["fixed", "lagged_expost"] = "fixed"
+    toporag_kappa_max: float = Field(default=0.9, ge=0, lt=1, allow_inf_nan=False)
+    toporag_prior_scale: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    toporag_prompt_context: bool = False
 
     # --- Parâmetros do Orquestrador Cognitivo (Cloud LLM Planner) ---
     cognitive_planner: bool = False
