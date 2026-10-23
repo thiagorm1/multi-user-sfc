@@ -585,3 +585,150 @@ os arquivos de origem não são alterados. As 33 sementes vêm da fonte indicada
 Total: 3.300 requisições nos dois pesos. Não há retreinamento nem novas chamadas
 Qwen. A saída continua em uma pasta exclusiva com data/hora. Omitir `--requests`
 preserva o comportamento anterior de avaliar toda a carga da fonte.
+
+### MUVR com mobilidade SUMO (modo opcional)
+
+`benchmark_mappo_qwen_muvr.py --sumo-net
+src/muar_sfc/sumo/small_luxembourg/luxembourg.net.xml --sumo-binary
+.venv/bin/sumo --mobility-step-s 1` ativa Eclipse SUMO/TraCI. Sem `--sumo-net`,
+o benchmark permanece estático. É necessário o executável Eclipse SUMO; o pacote
+científico Python chamado `sumo` não o fornece. O diretório `--output` deve ser novo.
+
+**[ASSUMIDO NO SIMULADOR]** Cada jogador corresponde a um veículo de passageiros.
+Rotas são caminhadas aleatórias determinísticas por semente no maior componente
+fortemente conexo de arestas transitáveis do mapa local, com comprimento suficiente
+para o horizonte. Os 25 servidores recebem âncoras em uma grade sobre os limites
+cartesianos do mapa; cada destino móvel é associado à âncora mais próxima. Isso
+é uma associação espacial sintética, sem modelo de rádio, cobertura ou filas de
+acesso. A fonte original da sessão permanece fixa. O `same_access` estático
+significa destino comum entre jogadores, não necessariamente igual à fonte;
+no modo móvel os destinos passam a acompanhar cada veículo individualmente.
+Portanto, este modo é uma nova condição experimental e não uma reprodução da
+carga estática apenas com outra visualização.
+
+O relógio TraCI avança em passos virtuais (padrão 1 s, divisor do intervalo de
+chegadas). Um deslocamento inicial de um passo permite materializar os veículos
+que partem no instante zero. **[ASSUMIDO NO SIMULADOR]** Se o SUMO ainda mantém um
+veículo em `getPendingVehicles()` por atraso de inserção, sua posição é o início da
+primeira aresta da rota, com velocidade zero e direção da aresta, até entrar na
+rede. Essa situação é registrada em cada amostra; um veículo que não está na rede
+nem na fila pendente, ou que é teletransportado, causa erro explícito. A
+amostragem por passo não mede mudanças de acesso que ocorram e se revertam dentro
+do mesmo passo.
+
+A cada mudança de destino de uma sessão ativa, os mesmos atores e as mesmas
+restrições propõem uma cadeia substituta. A preparação mantém as reservas antigas
+enquanto valida todas as novas; a confirmação libera as antigas atomicamente.
+Se a substituição não couber ou violar o SLA, a sessão inteira é interrompida e
+seus recursos são liberados. Não há resgate heurístico. A admissão inicial e as
+interrupções posteriores são métricas distintas: `accepted` continua contando
+apenas admissão inicial. `mobility.sessions_interrupted` e
+`mobility.unserved_session_seconds` registram as interrupções e o tempo virtual
+restante sem serviço; não representam duração medida de handover de pacotes.
+Não são simulados cópia de estado de aplicações, migração física, display ou
+continuidade de frames. O custo real da decisão do handover é registrado à parte.
+
+**[MEDIDO]** Cada linha de resultado inclui versão SUMO, semente, hashes do mapa,
+rotas geradas, âncoras e posições observadas, além dos eventos com destinos antigos
+e novos, resultado da substituição e distribuição do tempo de decisão. As rotas e
+âncoras são geradas por semente; posições observadas também dependem da duração
+real de cada sessão aceita. CPU, memória, banda e SLA seguem os valores informados
+na execução, sem aumento de capacidade. A orientação Qwen segue o mesmo worker;
+o handover usa a orientação válida disponível, sem gerar uma consulta síncrona.
+
+### Treino MAPPO com trajetórias móveis SUMO
+
+O modo `muvr_sumo_v1` integra as posições e a história de movimento às entradas
+MAPPO e permite treinar a escolha dos hosts durante sessões móveis. O SUMO gera
+o movimento dos veículos; ele não aprende, e os atores não controlam os veículos.
+O checkpoint estático continua usando 48 entradas por ator e estado 196. O novo
+schema usa **60 entradas por ator, estado central 244, quatro atores e sete ações**.
+Um checkpoint antigo não pode ser usado como política móvel por mudar apenas um
+argumento; o carregamento exige schema, dimensões, hash da ordem/normalização das
+features e evidência de atualizações de treino compatíveis.
+
+**[ASSUMIDO NO SIMULADOR]** Nesta primeira versão, cada episódio contém **uma
+sessão completa com quatro jogadores**, sem tráfego de outras sessões. CPU,
+memória, banda, precedências do DAG, compartilhamento e rollback usam o mecanismo
+físico existente. A admissão e cada troca de acesso usam uma única tentativa dos
+atores por função, sem resgate heurístico. A mudança de acesso dispara o handover;
+os atores escolhem os hosts, mas não têm uma ação para adiar a migração/manter a
+cadeia. Não se pode afirmar que aprenderam a reduzir o número de mudanças de
+acesso ou prever a rota. A avaliação com muitas sessões concorrentes constitui
+outra condição de carga e precisa ser medida separadamente.
+
+As 12 features móveis são, nesta ordem: posição x/y normalizada pelas âncoras,
+velocidade atual dividida por 60 m/s, seno/cosseno da direção SUMO, deslocamento x/y
+desde o último passo observado normalizado pelas âncoras, acesso atual/anterior
+dividido por 25, tempo desde a última mudança dividido por 120 s (limitado a 1),
+indicador de decisão de handover e tempo desde a chegada dividido por 120 s
+(limitado a 1). O ator recebe as features do jogador atual. O crítico recebe as
+features dos quatro jogadores, na ordem deles, além do estado físico estático.
+Não há coordenadas futuras, rota planejada nem interpolação usando o próximo
+sample. Os deltas e o acesso anterior são atualizados a cada passo, mesmo se não
+houver uma decisão. O replay usa somente a amostra cujo instante é menor ou igual
+ao instante atual. A resolução padrão é 1 s; mudanças dentro de um passo não são
+resolvidas. Como a duração da sessão pode ser fracionária, a última observação
+móvel pode ocorrer antes da expiração exata, que continua liberando os recursos.
+
+O retorno móvel não reaplica os bônus terminais por cadeia do treinador estático.
+Cada decisão de função custa 0,001; cada tentativa de handover custa 1. Ao encerrar
+a sessão, acrescenta-se `100 × fração do tempo da sessão atendida`; rejeição
+inicial vale −100 e interrupção posterior acrescenta −100. São pesos de projeto,
+sem equivalência a uma recompensa publicada. O buffer liga as decisões dos quatro
+jogadores e dos handovers: somente o final da sessão marca `done=True`, permitindo
+que GAE atribua crédito à admissão e aos posicionamentos anteriores. O desconto
+`gamma` é por decisão dos atores, não por segundo virtual. Cada atualização usa
+apenas episódios completos, sem ligar o retorno de sementes/sessões diferentes.
+
+A coleta independente da política mantém os quatro veículos por todo o horizonte
+máximo de 120 s. Ela grava trajetórias SUMO reais com hashes do mapa, rotas,
+âncoras, observações e separação de sementes. O treino usa **replay dessas
+trajetórias**, sem iniciar SUMO, consultar Qwen ou retreinar o LLM. O manifesto
+incompleto, checksum divergente, trajetória truncada e sobreposição entre sementes
+de treino/validação/teste são rejeitados. A seleção do checkpoint consulta apenas
+a validação; o teste é usado uma vez, depois da seleção.
+
+Exemplo de preparação e execução manual (remover `--check` executa a etapa indicada;
+estes comandos não foram executados como campanha de treino):
+
+```bash
+.venv/bin/python scripts/collect_mappo_sumo.py \
+  --sumo-net src/muar_sfc/sumo/small_luxembourg/luxembourg.net.xml \
+  --sumo-binary .venv/bin/sumo --sla-ms 12 \
+  --train-seeds 1000 1001 1002 1003 \
+  --validation-seeds 2000 2001 --test-seeds 3000 3001 \
+  --output-root results/sumo_training_traces --check
+
+# Use a pasta exclusiva informada pela coleta concluída.
+.venv/bin/python scripts/train_mappo_sumo.py \
+  --dataset results/sumo_training_traces/PASTA_DA_COLETA \
+  --epochs 100 --threads 4 --load-balance-scale 0.0 \
+  --output-root rl_saved_models/mappo_sumo --check
+```
+
+O SLA padrão dos dois perfis continua em 6 ms; `--sla-ms 12` na coleta cria uma
+condição explícita com SLA de 12 ms, transportada pelo manifesto ao treino. Os
+scripts criam subpastas com data/hora, não sobrescrevem dados nem pesos anteriores,
+e `--check` não inicia SUMO, otimizadores, workers Qwen nem escreve saídas.
+`--help` também não executa nenhuma etapa.
+
+Depois de um treino explicitamente autorizado e concluído, o checkpoint novo
+pode ser avaliado com SUMO ao vivo, usando o mesmo extrator causal:
+
+```bash
+.venv/bin/python scripts/benchmark_mappo_qwen_muvr.py \
+  --policy-schema muvr_sumo_v1 --model CAMINHO_NOVO/model.pt \
+  --sumo-net src/muar_sfc/sumo/small_luxembourg/luxembourg.net.xml \
+  --sumo-binary .venv/bin/sumo --mobility-step-s 1 \
+  --requests 50 --seeds 42 43 44 --sla-ms 12 \
+  --variants mappo --search-attempts 1 --load-balance-scale 0.0 \
+  --output results/NOVA_PASTA_EXCLUSIVA
+```
+
+Esse exemplo não usa Qwen. Acrescentar a variante `mappo_qwen` passa a consultar o
+worker real e exige autorização para essa execução. As dimensões novas tornam
+explícita a integração da mobilidade; sua implementação, sozinha, não demonstra
+melhora de aceitação, continuidade ou latência. **[MEDIDO]** Somente após treinar e
+avaliar devem ser registrados os resultados do novo checkpoint e a comparação
+pareada com o modelo estático.
