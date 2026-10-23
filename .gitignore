@@ -35,6 +35,7 @@ results/
 rl_saved_models/
 variaveis_salvas/
 backup_log.txt
+reporef/
 
 # --- Arquivos Temporários de Teste / Scratchpads ---
 test.py
