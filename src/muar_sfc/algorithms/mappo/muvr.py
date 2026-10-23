@@ -15,7 +15,8 @@ import torch
 from muar_sfc.algorithms.mappo.env_mappo import MAPPO_SFC_Env, safe_comp_latency
 from muar_sfc.algorithms.mappo.mappo_core import MAPPOTrainer
 from muar_sfc.controllers.cloud_llm_planner import CloudLLMPlanner, CognitiveGuidance
-from muar_sfc.core.orchestration.placement import node_demand
+from muar_sfc.controllers.toporag import TopoRAGMemory, node_prior, sf_type, structural_signature
+from muar_sfc.core.orchestration.placement import available_paths, node_demand
 
 
 class MUVRMAPPOEnv(MAPPO_SFC_Env):
@@ -44,6 +45,8 @@ class MUVRMAPPOEnv(MAPPO_SFC_Env):
         self.reset_sfc(sfc)
 
     def reset_sfc(self, sfc):
+        self._input_paths_token = None
+        self._input_paths_cache = {}
         self.destination_distances = nx.single_source_dijkstra_path_length(
             self.base_graph, sfc.dst_node, weight="latency"
         )
@@ -67,6 +70,24 @@ class MUVRMAPPOEnv(MAPPO_SFC_Env):
             )
         self.actor_decisions = []
         return super().reset_sfc(sfc)
+
+    def _input_path(self, graph, start, node, bandwidth, key, first):
+        # Only the first dependency sees the unmodified parent edge snapshot.
+        # Subsequent dependencies must route against this candidate's reservations.
+        if not first or self.current_vnf_idx >= len(self.vnf_sequence):
+            return super()._input_path(graph, start, node, bandwidth, key, first)
+        vnf = self.vnf_sequence[self.current_vnf_idx]
+        token = (id(self.graph), self.current_vnf_idx,
+                 frozenset(self.excluded_nodes.get(vnf.id, ())))
+        if token != self._input_paths_token:
+            self._input_paths_token = token
+            self._input_paths_cache = {}
+        route_key = (start, bandwidth, key, self.shareband)
+        if route_key not in self._input_paths_cache:
+            self._input_paths_cache[route_key] = available_paths(
+                self.graph, start, bandwidth, key, self.shareband
+            )
+        return self._input_paths_cache[route_key].get(node, [])
 
     def _candidate(self, node):
         candidate = super()._candidate(node)
@@ -176,7 +197,7 @@ class MUVRQwenPlanner(CloudLLMPlanner):
             "distance_to_source_ms",
             "distance_to_destination_ms",
         ]
-        return {
+        compact = {
             "sla_ms": telemetry["sla_ms"],
             "cpu_global_pct": round(telemetry["net_cpu_util_pct"], 2),
             "session_cpu_memory": [20, 15],
@@ -188,6 +209,9 @@ class MUVRQwenPlanner(CloudLLMPlanner):
             ],
             "cache_ready_nodes": telemetry["cache_ready_nodes"],
         }
+        if telemetry.get("toporag_context"):
+            compact["toporag_context"] = telemetry["toporag_context"]
+        return compact
 
     @staticmethod
     def response_schema(telemetry):
@@ -288,7 +312,7 @@ class MUVRQwenPlanner(CloudLLMPlanner):
             }
             for node, data in graph.nodes(data=True)
         ]
-        return {
+        snapshot = {
             "sla_ms": batch[0].latency_request,
             "players": len(batch),
             "cpu_per_distinct_session": 20,
@@ -305,6 +329,10 @@ class MUVRQwenPlanner(CloudLLMPlanner):
             "Give concise reasoning (one sentence); weights sum to one. "
             "No capacity increases, no waiting, no SLA relaxation.",
         }
+        context = getattr(net, "_toporag_context", None)
+        if self.settings.toporag_prompt_context and context:
+            snapshot["toporag_context"] = copy.deepcopy(context)
+        return snapshot
 
 
 class TrainedMUVRMAPPO:
@@ -366,6 +394,82 @@ class TrainedMUVRMAPPO:
         self.guidance_misses = 0
         self.background_skipped_busy = 0
         self.closed = False
+        self.toporag_memory = TopoRAGMemory()
+        self.toporag_decisions = []
+        self._toporag_prior = {}
+        self._toporag_kappa = 0.0
+        self._previous_cycle_success = 0.0
+
+    def reset_toporag(self):
+        """Explicit memory boundary; normally a new adapter is created per seed."""
+        self.toporag_memory.reset()
+        self.toporag_decisions = []
+        self._toporag_prior = {}
+        self._toporag_kappa = 0.0
+        self._previous_cycle_success = 0.0
+
+    def toporag_parameters(self):
+        return {
+            key: getattr(self.settings, "toporag_" + key)
+            for key in (
+                "enabled", "top_k", "kappa", "confidence_mode", "kappa_max",
+                "prior_scale", "prompt_context",
+            )
+        }
+
+    def _toporag_begin(self, graph, sfc):
+        signature = structural_signature(sfc, graph)
+        retrieved = self.toporag_memory.retrieve(signature, self.settings.toporag_top_k)
+        self._toporag_prior = node_prior(retrieved)
+        return {
+            "kappa": self._toporag_kappa,
+            "retrieved_k": len(retrieved),
+            "memory_size": len(self.toporag_memory),
+            "signature": signature,
+            "state_hash": self.toporag_memory.state_hash(),
+        }
+
+    def _effective_toporag_kappa(self):
+        if self.settings.toporag_confidence_mode == "fixed":
+            return self.settings.toporag_kappa
+        return min(self.settings.toporag_kappa_max, self._previous_cycle_success)
+
+    def _toporag_finish(self, evidence, players, accepted):
+        if not getattr(self.settings, "toporag_enabled", False):
+            return
+        cycle = len(self.request_evidence)
+        for sfc, env, metadata in players:
+            hosts = {}
+            for name, host in env.allocated_nodes.items():
+                role = sf_type(sfc.get_vnf_by_id(name))
+                hosts.setdefault(role, []).append(host)
+            trace = {
+                "signature": metadata["signature"],
+                "hosts_by_type": hosts,
+                "accepted": accepted,
+                "sla_met": bool(accepted and env.total_latency <= sfc.latency_request + 1e-9),
+                "critical_latency_ms": env.total_latency if env.success else None,
+                "cycle": cycle,
+                "virtual_time": sfc.arrival_time,
+                "session": sfc.session_id,
+            }
+            self.toporag_memory.record(trace)
+            metadata["state_hash_after"] = self.toporag_memory.state_hash()
+            self.toporag_decisions.append(copy.deepcopy(metadata))
+        evidence["toporag"] = [metadata for _, _, metadata in players]
+        if self.planning_records:
+            # Append evidence only; never append a planning cycle or change guidance fields.
+            self.planning_records[-1].setdefault("toporag_admissions", []).append({
+                "admission_cycle": cycle,
+                "players": copy.deepcopy(evidence["toporag"]),
+            })
+        # A cycle is one admission batch (arrival), NOT a worker completion.
+        # Only requests that actually used guidance enter this ex-post fraction.
+        self._previous_cycle_success = float(
+            evidence["guidance_used"] and accepted and all(
+                env.total_latency <= sfc.latency_request + 1e-9 for sfc, env, _ in players
+            )
+        )
 
     def set_mobility_context(self, context, phase):
         if self.policy_schema == "muvr_sumo_v1":
@@ -407,6 +511,7 @@ class TrainedMUVRMAPPO:
                 "planning_seconds": ready_at - tick,
                 "guidance": guidance.model_dump() if success else None,
                 "error": error,
+                "toporag": copy.deepcopy(getattr(net, "_toporag_metadata", None)),
             },
         )
 
@@ -443,8 +548,21 @@ class TrainedMUVRMAPPO:
             self.background_skipped_busy += 1
             return
         self.pending_started_at = time.perf_counter()
+        snapshot = copy.deepcopy(net)
+        if getattr(self.settings, "toporag_enabled", False):
+            signature = structural_signature(batch[0], snapshot.graph)
+            snapshot._toporag_metadata = {
+                "parameters": self.toporag_parameters(),
+                "state_hash": self.toporag_memory.state_hash(),
+                "memory_size": len(self.toporag_memory),
+                "kappa": self._effective_toporag_kappa(),
+            }
+            if self.settings.toporag_prompt_context and len(self.toporag_memory):
+                snapshot._toporag_context = self.toporag_memory.retrieve(
+                    signature, self.settings.toporag_top_k
+                )
         self.pending = self.executor.submit(
-            self._background_plan, copy.deepcopy(net), copy.deepcopy(batch), now
+            self._background_plan, snapshot, copy.deepcopy(batch), now
         )
         self.last_submission = now
 
@@ -486,6 +604,10 @@ class TrainedMUVRMAPPO:
             else:
                 env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
             env.load_balance_scale = getattr(self.settings, "mappo_load_balance_scale", 2.0)
+            if getattr(self.settings, "toporag_enabled", False):
+                env.toporag_prior = self._toporag_prior
+                env.toporag_kappa = self._toporag_kappa
+                env.toporag_prior_scale = self.settings.toporag_prior_scale
             if dimensions(env) != self.checkpoint_dimensions:
                 raise ValueError("MAPPO checkpoint dimensions do not match this topology")
             obs = env.get_observations()
@@ -554,13 +676,22 @@ class TrainedMUVRMAPPO:
             self.guidance_misses += self.guidance is None
         trial = copy.deepcopy(net)
         latencies, decisions, searches = [], [], []
+        players = []
+        if getattr(self.settings, "toporag_enabled", False):
+            self._toporag_kappa = self._effective_toporag_kappa()
         for player_index, original in enumerate(batch):
             self.player_index = player_index
             sfc = copy.deepcopy(original)
+            metadata = (
+                self._toporag_begin(trial.graph, sfc)
+                if getattr(self.settings, "toporag_enabled", False) else None
+            )
             torch.manual_seed(
                 self.settings.seed * 100000 + int(sfc.session_id) * 100 + player_index
             )
             env, trace = self._search_policy(trial.graph, sfc)
+            if metadata is not None:
+                players.append((sfc, env, metadata))
             decisions.extend(trace)
             searches.append({"player_index": player_index, "attempts": env.search_summary})
             if not env.success:
@@ -575,6 +706,7 @@ class TrainedMUVRMAPPO:
                         "accepted": False,
                     }
                 )
+                self._toporag_finish(self.request_evidence[-1], players, False)
                 return None, [], "trained_mappo_no_feasible_proposal"
             sfc.edge_routes = env.edge_routes
             sfc.edge_latencies = env.edge_latencies
@@ -592,6 +724,7 @@ class TrainedMUVRMAPPO:
                 "accepted": True,
             }
         )
+        self._toporag_finish(self.request_evidence[-1], players, True)
         return trial, latencies, "trained_mappo_qwen" if self.qwen else "trained_mappo"
 
     def evidence(self):
@@ -616,4 +749,10 @@ class TrainedMUVRMAPPO:
             "qwen_planning_seconds": sum(r["planning_seconds"] for r in self.planning_records),
             "planning_records": self.planning_records,
             "request_evidence": self.request_evidence,
+            "toporag": {
+                "parameters": self.toporag_parameters(),
+                "state_hash": self.toporag_memory.state_hash(),
+                "memory_size": len(self.toporag_memory),
+                "decisions": self.toporag_decisions,
+            },
         }

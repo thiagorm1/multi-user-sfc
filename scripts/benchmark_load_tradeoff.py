@@ -15,6 +15,7 @@ from muar_sfc.config import SimulationSettings
 from muar_sfc.controllers.cloud_llm_planner import CognitiveGuidance
 from muar_sfc.core.ar_metrics import distribution
 from muar_sfc.core.scenarios.muvr_reference import MUVRProfile, simulate
+from muar_sfc.experiment_config import TopoRAG
 
 
 class ReplayedGuidance(TrainedMUVRMAPPO):
@@ -115,6 +116,42 @@ def limit_source_requests(source, requests):
     }
 
 
+def toporag_replay_manifest(document):
+    """Reject unsupported active-source replay before checkpoint reads or output creation."""
+    replay = TopoRAG().model_dump()
+    execution = {
+        key.removeprefix("toporag_"): value
+        for key, value in document.get("execution_parameters", {}).items()
+        if key.startswith("toporag_")
+    }
+    result = {}
+    for row in document["rows"]:
+        seed = str(row["seed"])
+        evidence = row.get("inference_evidence", {}).get("toporag", {})
+        manifest = document.get("toporag_manifest", {}).get(seed, {})
+        recorded = [
+            ("inference_evidence.toporag.parameters", evidence.get("parameters")),
+            ("toporag_manifest.parameters", manifest.get("parameters")),
+            ("execution_parameters", execution or None),
+        ]
+        source, origin = dict(replay), "legacy_defaults_no_toporag_record"
+        found = False
+        for location, parameters in recorded:
+            if parameters is None:
+                continue
+            parameters = TopoRAG.model_validate(parameters).model_dump()
+            if parameters["enabled"]:
+                raise ValueError(
+                    f"TopoRAG enabled in source seed {seed} ({location}); this replay "
+                    "does not replicate TopoRAG parameters. Refusing a silent change "
+                    "of experimental conditions (including lagged confidence/prompt context)."
+                )
+            if not found:
+                source, origin, found = parameters, location, True
+        result[seed] = {"source": source, "source_parameters_origin": origin, "replay": replay}
+    return result
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--guidance-source", type=Path, required=True)
@@ -136,6 +173,10 @@ def main():
     if any(not 0 <= v <= 2 for v in args.scales):
         p.error("This experiment supports scales from zero to the original 2.0")
     doc = json.loads(args.guidance_source.read_text())
+    try:
+        toporag = toporag_replay_manifest(doc)
+    except ValueError as exc:
+        p.error(str(exc))
     sources = doc["rows"]
     expected_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()
     if not all(r["inference_evidence"]["model_sha256"] == expected_hash for r in sources):
@@ -172,6 +213,7 @@ def main():
         "workload_selection": "same recorded prefix per seed",
         "seeds": [r["seed"] for r in sources],
         "scales": args.scales,
+        "toporag": toporag,
         "method": "Recorded real Qwen guidance replayed per request for every scale. "
         "No new LLM calls, no training, same nominal physical profile, SLA and search budget. "
         "CPU utilization below refers to simulated edge servers, not host process CPU.",
@@ -192,6 +234,10 @@ def main():
                 mappo_model_path=str(args.model),
                 mappo_search_attempts=16,
                 mappo_load_balance_scale=scale,
+                **{
+                    "toporag_" + key: value
+                    for key, value in toporag[str(source["seed"])]["replay"].items()
+                },
             )
             adapter = ReplayedGuidance(settings, source)
             try:

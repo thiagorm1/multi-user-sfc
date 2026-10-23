@@ -127,10 +127,7 @@ def reserve_bandwidth(data, key, bandwidth, shareband, is_backup=False):
     return cost
 
 
-def available_path(graph, source, target, bandwidth, key, shareband):
-    if source == target:
-        return [source] if source in graph else []
-
+def _available_weight(graph, bandwidth, key, shareband):
     def weight(_u, _v, data):
         if not graph.nodes[_u].get("is_active", True) or not graph.nodes[_v].get(
             "is_active", True
@@ -148,7 +145,26 @@ def available_path(graph, source, target, bandwidth, key, shareband):
         pressure = cost / max(1.0, free) if cost else 0
         return data.get("latency", 1.0) + pressure * 0.1
 
+    return weight
+
+
+def available_paths(graph, source, bandwidth, key, shareband):
+    """Exact residual-bandwidth paths for one immutable resource snapshot."""
     try:
-        return nx.dijkstra_path(graph, source, target, weight=weight)
+        return nx.single_source_dijkstra(
+            graph, source, weight=_available_weight(graph, bandwidth, key, shareband)
+        )[1]
+    except nx.NodeNotFound:
+        return {}
+
+
+def available_path(graph, source, target, bandwidth, key, shareband):
+    if source == target:
+        return [source] if source in graph else []
+
+    try:
+        return nx.dijkstra_path(
+            graph, source, target, weight=_available_weight(graph, bandwidth, key, shareband)
+        )
     except (nx.NetworkXNoPath, nx.NodeNotFound):
         return []

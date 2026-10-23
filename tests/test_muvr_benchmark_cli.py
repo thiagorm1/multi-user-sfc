@@ -1,6 +1,7 @@
 import json
 
 from scripts import benchmark_mappo_qwen_muvr as benchmark
+from muar_sfc.controllers.toporag import TopoRAGMemory
 
 
 def test_sla_override_reaches_workload_and_adapter_without_real_inference(tmp_path, monkeypatch):
@@ -10,6 +11,10 @@ def test_sla_override_reaches_workload_and_adapter_without_real_inference(tmp_pa
         def __init__(self, settings, qwen, policy_schema):
             observed.append((settings.latency, settings.seed, qwen, policy_schema))
             self.closed = False
+            self.toporag_memory = TopoRAGMemory()
+
+        def toporag_parameters(self):
+            return {"enabled": False}
 
         def close(self):
             self.closed = True

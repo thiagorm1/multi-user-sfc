@@ -259,7 +259,7 @@ class MAPPO_SFC_Env:
             start = self.src_node if predecessor == "src" else self.allocated_nodes[predecessor]
             bw = self.sfc.graph.edges[predecessor, vnf_id]["bandwidth"]
             key = stream_key(self.sfc, predecessor, vnf_id, self.shareband)
-            path = available_path(graph, start, node, bw, key, self.shareband)
+            path = self._input_path(graph, start, node, bw, key, not routes)
             if not path:
                 raise ValueError("Sem rota com banda suficiente para uma dependência.")
             sender = copy.copy(self.sfc.get_vnf_by_id(predecessor))
@@ -277,6 +277,9 @@ class MAPPO_SFC_Env:
         if len(arrivals) > 1 and differential > self.sync_tolerance:
             raise ValueError("Sincronização inter-modal excedeu o SLA.")
         return routes, latencies, max(arrivals, default=0), differential
+
+    def _input_path(self, graph, start, node, bandwidth, key, first):
+        return available_path(graph, start, node, bandwidth, key, self.shareband)
 
     def _candidate(self, node):
         vnf = self.vnf_sequence[self.current_vnf_idx]
@@ -457,6 +460,19 @@ class MAPPO_SFC_Env:
         )
         best = None
         best_cost = float("inf")
+        prior = getattr(self, "toporag_prior", {})
+        kappa = getattr(self, "toporag_kappa", 0.0)
+        if kappa and prior:
+            from muar_sfc.controllers.toporag import sf_type
+
+            scores = prior.get(sf_type(vnf), {})
+        else:
+            scores = {}
+        # Only physically feasible actor proposals participate in normalisation.
+        maximum = max(
+            (scores.get(n, 0) for n in candidates if self._evaluated_candidate(n) is not None),
+            default=0,
+        ) if scores else 0
         for node in sorted(candidates, key=str):
             result = self._evaluated_candidate(node)
             if result is None:
@@ -500,6 +516,8 @@ class MAPPO_SFC_Env:
                 - float(reused) * 4
                 - float(node in proposals) * self.policy_weight
             )
+            if kappa and maximum:
+                cost -= kappa * self.toporag_prior_scale * scores.get(node, 0) / maximum
             if cost < best_cost:
                 best_cost = cost
                 best = node, result

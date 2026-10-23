@@ -40,6 +40,15 @@ def main(argv=None):
     parser.add_argument("--mobility-step-s", type=float, default=1.0)
     parser.add_argument("--policy-schema", choices=["muvr_static_v1", "muvr_sumo_v1"],
                         default="muvr_static_v1")
+    parser.add_argument("--toporag-enabled", action="store_true")
+    parser.add_argument("--toporag-top-k", type=int, default=4)
+    parser.add_argument("--toporag-kappa", type=float, default=0.0)
+    parser.add_argument(
+        "--toporag-confidence-mode", choices=["fixed", "lagged_expost"], default="fixed"
+    )
+    parser.add_argument("--toporag-kappa-max", type=float, default=0.9)
+    parser.add_argument("--toporag-prior-scale", type=float, default=1.0)
+    parser.add_argument("--toporag-prompt-context", action="store_true")
     args = parser.parse_args(argv)
     if args.policy_schema == "muvr_sumo_v1" and args.sumo_net is None:
         parser.error("Mobile policy schema requires --sumo-net")
@@ -68,6 +77,7 @@ def main(argv=None):
         cognitive_guidance_max_age=args.guidance_max_age,
         mappo_search_attempts=args.search_attempts,
         mappo_load_balance_scale=args.load_balance_scale,
+        **{key: value for key, value in vars(args).items() if key.startswith("toporag_")},
     )
     for variant in args.variants:
         document = {
@@ -107,6 +117,11 @@ def main(argv=None):
             finally:
                 adapter.close()
             row["inference_evidence"] = adapter.evidence()
+            document.setdefault("toporag_manifest", {})[str(seed)] = {
+                "parameters": adapter.toporag_parameters(),
+                "state_hash": adapter.toporag_memory.state_hash(),
+                "memory_size": len(adapter.toporag_memory),
+            }
             document["rows"].append(row)
             (args.output / f"{variant}.json").write_text(
                 json.dumps(document, indent=2, allow_nan=False)

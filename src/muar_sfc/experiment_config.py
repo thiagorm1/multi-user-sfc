@@ -66,11 +66,22 @@ class Qwen(Section):
         return self
 
 
+class TopoRAG(Section):
+    enabled: bool = False
+    top_k: int = Field(default=4, ge=1)
+    kappa: float = Field(default=0.0, ge=0, lt=1)
+    confidence_mode: Literal["fixed", "lagged_expost"] = "fixed"
+    kappa_max: float = Field(default=0.9, ge=0, lt=1)
+    prior_scale: float = Field(default=1.0, ge=0)
+    prompt_context: bool = False
+
+
 class ExperimentConfig(Section):
     execution: Execution = Field(default_factory=Execution)
     training: Training = Field(default_factory=Training)
     evaluation: Evaluation = Field(default_factory=Evaluation)
     qwen: Qwen = Field(default_factory=Qwen)
+    toporag: TopoRAG = Field(default_factory=TopoRAG)
 
     @model_validator(mode="after")
     def disjoint_seeds(self):
@@ -145,4 +156,11 @@ def command_plan(config, root, python):
                 str(q.guidance_max_age),
             ]
         )
+        for key, value in config.toporag.model_dump().items():
+            flag = "--toporag-" + key.replace("_", "-")
+            if isinstance(value, bool):
+                if value:
+                    commands[-1].append(flag)
+            else:
+                commands[-1] += [flag, str(value)]
     return commands
