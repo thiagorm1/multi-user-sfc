@@ -373,7 +373,8 @@ def audit(net):
 
 
 def simulate(
-    profile, seed, strategy="joint", admitter=None, frame_samples=None, ar_budget_ms=None
+    profile, seed, strategy="joint", admitter=None, frame_samples=None, ar_budget_ms=None,
+    mobility=None,
 ):
     net = build_network(profile, seed)
     topology = {
@@ -396,16 +397,99 @@ def simulate(
         )
         previous_time = until
 
-    for index in range(profile.requests):
-        arrival = index * profile.arrival_interval
+    mobility_sessions, mobility_events = {}, []
+    mobility_tick = mobility.step_s if mobility is not None else None
+
+    def expire(until):
+        nonlocal active
         for expiry, ids in sorted(active):
-            if expiry <= arrival:
+            if expiry <= until:
                 integrate(expiry)
                 for sfc_id in ids:
                     net.undeploy_sfc(sfc_id)
-        active = [(expiry, ids) for expiry, ids in active if expiry > arrival]
-        integrate(arrival)
+                if mobility is not None:
+                    for session_index, state in list(mobility_sessions.items()):
+                        if state["ids"] == ids:
+                            mobility.retire(session_index)
+                            del mobility_sessions[session_index]
+        active = [(expiry, ids) for expiry, ids in active if expiry > until]
+
+    def advance_mobility(until):
+        nonlocal net, active, mobility_tick
+        if mobility is None:
+            expire(until)
+            integrate(until)
+            return
+        from muar_sfc.core.orchestration.handover import prepare_handover
+
+        while mobility_tick <= until + 1e-9:
+            at = min(mobility_tick, until)
+            expire(at)
+            integrate(at)
+            mobility.advance(at)
+            for session_index, state in list(mobility_sessions.items()):
+                destinations = mobility.destinations(session_index)
+                context_setter = (
+                    getattr(admitter, "set_mobility_context", None)
+                    if getattr(admitter, "requires_mobility_context", False) else None
+                )
+                if context_setter:
+                    context_setter(mobility.observation(session_index), phase="handover")
+                if destinations == state["destinations"]:
+                    continue
+                replacement = copy.deepcopy(state["batch"])
+                state["generation"] += 1
+                for player, sfc in enumerate(replacement):
+                    sfc.id = f"{state['original_ids'][player]}_mobility_{state['generation']}"
+                    sfc.set_dst_substrate_node(destinations[player])
+                    sfc.closer_router = destinations[player]
+                started = time.perf_counter()
+                prepared = prepare_handover(net, state["ids"], replacement,
+                                            admitter or admit, strategy)
+                event = {"time_s": at, "session_index": session_index,
+                         "old_destinations": state["destinations"],
+                         "new_destinations": destinations,
+                         "handover_committed": prepared is not None}
+                if prepared is None:
+                    for old_id in state["ids"]:
+                        net.undeploy_sfc(old_id)
+                    active = [(expiry, ids) for expiry, ids in active if ids != state["ids"]]
+                    mobility.retire(session_index)
+                    del mobility_sessions[session_index]
+                    event["session_interrupted"] = True
+                    event["unserved_remaining_s"] = max(0, state["expiry"] - at)
+                else:
+                    net = prepared.commit(net)
+                    new_ids = [s.id for s in replacement]
+                    active = [(expiry, new_ids if ids == state["ids"] else ids)
+                              for expiry, ids in active]
+                    state.update(ids=new_ids, batch=replacement, destinations=destinations)
+                    event["latencies_ms"] = list(prepared.latencies_ms)
+                    event["session_interrupted"] = False
+                audit(net)
+                event["decision_s"] = time.perf_counter() - started
+                mobility_events.append(event)
+            mobility_tick += mobility.step_s
+        expire(until)
+        integrate(until)
+
+    for index in range(profile.requests):
+        arrival = index * profile.arrival_interval
+        advance_mobility(arrival)
         batch, metadata = generate_session(profile, index, rng)
+        if mobility is not None:
+            metadata["static_destinations"] = list(metadata["destinations"])
+            destinations = mobility.destinations(index)
+            metadata["destinations"] = destinations
+            for sfc, destination in zip(batch, destinations, strict=True):
+                sfc.set_dst_substrate_node(destination)
+                sfc.closer_router = destination
+        context_setter = (getattr(admitter, "set_mobility_context", None)
+                          if getattr(admitter, "requires_mobility_context", False) else None)
+        if context_setter:
+            if mobility is None:
+                raise ValueError("Mobile MAPPO requires a mobility source")
+            context_setter(mobility.observation(index), phase="admission")
         for sfc in batch:
             sfc.arrival_time = arrival
         lower_bound = latency_lower_bound(net, batch)
@@ -420,6 +504,14 @@ def simulate(
         if candidate is not None:
             net = candidate
             active.append((arrival + batch[0].duration, [s.id for s in batch]))
+            if mobility is not None:
+                mobility_sessions[index] = {
+                    "ids": [s.id for s in batch], "original_ids": [s.id for s in batch],
+                    "batch": copy.deepcopy(batch), "destinations": list(metadata["destinations"]),
+                    "expiry": arrival + batch[0].duration, "generation": 0,
+                }
+        elif mobility is not None:
+            mobility.retire(index)
         audit(net)
         records.append(
             {
@@ -448,10 +540,13 @@ def simulate(
             }
         )
     # Audit full release and include the observation tail in time-weighted utilization.
-    for expiry, ids in sorted(active):
-        integrate(expiry)
-        for sfc_id in ids:
-            net.undeploy_sfc(sfc_id)
+    if mobility is not None:
+        advance_mobility(max((expiry for expiry, _ in active), default=previous_time))
+    else:
+        for expiry, ids in sorted(active):
+            integrate(expiry)
+            for sfc_id in ids:
+                net.undeploy_sfc(sfc_id)
     audit(net)
     assert all(
         abs(n["cpu_used"]) < 1e-7 and abs(n["cache_used"]) < 1e-7
@@ -477,6 +572,16 @@ def simulate(
     ]
     workload_hash = hashlib.sha256(json.dumps(trace, sort_keys=True).encode()).hexdigest()
     return {
+        **({"mobility": {
+            **mobility.evidence(), "events": mobility_events,
+            "access_change_events": len(mobility_events),
+            "handovers_committed": sum(e["handover_committed"] for e in mobility_events),
+            "sessions_interrupted": sum(e["session_interrupted"] for e in mobility_events),
+            "unserved_session_seconds": sum(e.get("unserved_remaining_s", 0)
+                                              for e in mobility_events),
+            "handover_decision_distribution_ms": distribution(
+                [1000 * e["decision_s"] for e in mobility_events]),
+        }} if mobility is not None else {}),
         "workload_sha256": workload_hash,
         "seed": seed,
         "strategy": strategy,

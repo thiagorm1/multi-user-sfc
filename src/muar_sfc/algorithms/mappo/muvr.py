@@ -216,7 +216,8 @@ class MUVRQwenPlanner(CloudLLMPlanner):
 
     def _call_openai_compatible_api(self, telemetry):
         system = (
-            "Você orienta atores MAPPO para aceitar sessões MUVR com SLA rígido de 6 ms. "
+            "Você orienta atores MAPPO para aceitar sessões MUVR com SLA rígido de "
+            f"{telemetry['sla_ms']:g} ms. "
             "Use apenas IDs da telemetria. Velocidade de processamento maior é melhor; "
             "distâncias menores são melhores. Priorize latência quando a CPU estiver livre. "
             "Evite apenas gargalos evidentes. Não aumente recursos nem relaxe o SLA. "
@@ -299,14 +300,19 @@ class MUVRQwenPlanner(CloudLLMPlanner):
             "cache_ready_nodes": [
                 n["id"] for n in nodes if n["memory_free"] >= 15 and n["cpu_free"] >= 20
             ],
-            "instruction": "SLA 6 ms is strict. Prefer short paths and fast hosts. "
+            "instruction": f"SLA {batch[0].latency_request:g} ms is strict. "
+            "Prefer short paths and fast hosts. "
             "Give concise reasoning (one sentence); weights sum to one. "
             "No capacity increases, no waiting, no SLA relaxation.",
         }
 
 
 class TrainedMUVRMAPPO:
-    def __init__(self, settings, qwen=False):
+    def __init__(self, settings, qwen=False, policy_schema="muvr_static_v1"):
+        self.policy_schema = policy_schema
+        self.mobility_context = None
+        self.requires_mobility_context = policy_schema == "muvr_sumo_v1"
+        self.player_index = 0
         self.settings = settings
         self.qwen = qwen
         if qwen and (
@@ -317,6 +323,22 @@ class TrainedMUVRMAPPO:
         if not self.model_path.is_file():
             raise FileNotFoundError(f"Trained MAPPO checkpoint missing: {self.model_path}")
         checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
+        if policy_schema not in ("muvr_static_v1", "muvr_sumo_v1"):
+            raise ValueError("Unknown MAPPO policy schema")
+        if checkpoint.get("policy_schema", "muvr_static_v1") != policy_schema:
+            raise ValueError("Checkpoint policy schema does not match the requested mode")
+        if policy_schema == "muvr_sumo_v1":
+            from muar_sfc.algorithms.mappo.mobile import OBSERVATION_SCHEMA_SHA256
+
+            if checkpoint.get("n_agents") != 4 or checkpoint.get("action_dim") != 7:
+                raise ValueError("Mobile checkpoint requires four actors with seven actions")
+            if checkpoint.get("observation_schema_sha256") != OBSERVATION_SCHEMA_SHA256:
+                raise ValueError("Mobile checkpoint observation schema checksum mismatch")
+            if settings.mappo_search_attempts != 1:
+                raise ValueError("Mobile evaluation requires one on-policy proposal attempt")
+        expected = (60, 244) if policy_schema == "muvr_sumo_v1" else (48, 196)
+        if (checkpoint.get("obs_dim"), checkpoint.get("state_dim")) != expected:
+            raise ValueError("Checkpoint observation/state dimensions violate policy schema")
         self.checkpoint_dimensions = {
             key: checkpoint.get(key) for key in ("n_agents", "obs_dim", "action_dim", "state_dim")
         }
@@ -344,6 +366,12 @@ class TrainedMUVRMAPPO:
         self.guidance_misses = 0
         self.background_skipped_busy = 0
         self.closed = False
+
+    def set_mobility_context(self, context, phase):
+        if self.policy_schema == "muvr_sumo_v1":
+            from muar_sfc.algorithms.mappo.mobile import causal_context
+
+            self.mobility_context = causal_context(context, phase)
 
     def update_cognitive_guidance(self, guidance):
         self.guidance = guidance
@@ -446,7 +474,17 @@ class TrainedMUVRMAPPO:
                 continue
             visited.add(signature)
             attempt = len(search_summary)
-            env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
+            if self.policy_schema == "muvr_sumo_v1":
+                from muar_sfc.algorithms.mappo.mobile import MobileMUVRMAPPOEnv
+
+                if self.mobility_context is None:
+                    raise ValueError("Mobile MAPPO has no causal mobility observation")
+                env = MobileMUVRMAPPOEnv(
+                    graph, sfc, self.mobility_context, self.player_index,
+                    n_regions=self.settings.n_mappo_regions, guidance=self.guidance,
+                )
+            else:
+                env = MUVRMAPPOEnv(graph, sfc, self.settings.n_mappo_regions, self.guidance)
             env.load_balance_scale = getattr(self.settings, "mappo_load_balance_scale", 2.0)
             if dimensions(env) != self.checkpoint_dimensions:
                 raise ValueError("MAPPO checkpoint dimensions do not match this topology")
@@ -517,6 +555,7 @@ class TrainedMUVRMAPPO:
         trial = copy.deepcopy(net)
         latencies, decisions, searches = [], [], []
         for player_index, original in enumerate(batch):
+            self.player_index = player_index
             sfc = copy.deepcopy(original)
             torch.manual_seed(
                 self.settings.seed * 100000 + int(sfc.session_id) * 100 + player_index

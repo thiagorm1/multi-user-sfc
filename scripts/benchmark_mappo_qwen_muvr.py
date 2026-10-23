@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from muar_sfc.core.scenarios.muvr_reference import MUVRProfile, simulate
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--requests", type=int, default=50)
+    parser.add_argument("--sla-ms", type=float, default=6.0,
+                        help="SLA de comunicação + processamento em ms (referência: 6).")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument(
         "--variants", nargs="+", choices=["mappo", "mappo_qwen"], default=["mappo", "mappo_qwen"]
@@ -31,16 +34,27 @@ def main(argv=None):
     parser.add_argument("--guidance-max-age", type=float, default=120)
     parser.add_argument("--search-attempts", type=int, default=16)
     parser.add_argument("--load-balance-scale", type=float, default=2.0)
+    parser.add_argument("--sumo-net", type=Path, default=None,
+                        help="Enable SUMO mobility using this road network XML.")
+    parser.add_argument("--sumo-binary", default="sumo")
+    parser.add_argument("--mobility-step-s", type=float, default=1.0)
+    parser.add_argument("--policy-schema", choices=["muvr_static_v1", "muvr_sumo_v1"],
+                        default="muvr_static_v1")
     args = parser.parse_args(argv)
+    if args.policy_schema == "muvr_sumo_v1" and args.sumo_net is None:
+        parser.error("Mobile policy schema requires --sumo-net")
+    if args.policy_schema == "muvr_sumo_v1" and args.search_attempts != 1:
+        parser.error("Mobile policy evaluation requires --search-attempts 1")
     torch.set_num_threads(args.threads)
-    args.output.mkdir(parents=True, exist_ok=True)
+    args.output.mkdir(parents=True, exist_ok=False)
     logger.remove()
     logger.add(args.output / "qwen.log", level="INFO")
-    profile = MUVRProfile(requests=args.requests)
+    profile = MUVRProfile(requests=args.requests, sla=args.sla_ms)
     settings = SimulationSettings(
         _env_file=None,
         application="muvr_reference",
         alg="mappo",
+        latency=args.sla_ms,
         n_mappo_regions=4,
         mappo_model_path=args.model,
         share=True,
@@ -68,14 +82,28 @@ def main(argv=None):
             "No heuristic rescue, no random checkpoint fallback, no queue or resource scaling. "
             "Qwen runs in a detached background worker; missing guidance uses MAPPO only. "
             "Submission and admission response times are reported separately. "
-            "Network SLA excludes orchestration; AR display latency is not simulated.",
+            "Network SLA excludes orchestration; AR display latency is not simulated. "
+            "Opt-in SUMO keeps the original source fixed and maps mobile destinations "
+            "to spatial anchors; make-before-break failure terminates the whole session. "
+            "No radio, packet interruption duration or physical migration time is simulated.",
         }
         for seed in args.seeds:
             adapter = TrainedMUVRMAPPO(
-                settings.model_copy(update={"seed": seed}), qwen=variant == "mappo_qwen"
+                settings.model_copy(update={"seed": seed}), qwen=variant == "mappo_qwen",
+                policy_schema=args.policy_schema
             )
             try:
-                row = simulate(profile, seed, variant, admitter=adapter)
+                mobility_context = nullcontext(None)
+                if args.sumo_net is not None:
+                    from muar_sfc.core.scenarios.sumo_mobility import SumoMobility
+
+                    mobility_context = SumoMobility(
+                        args.sumo_net, seed, profile.servers, profile.requests, profile.players,
+                        profile.arrival_interval, profile.lifetime, binary=args.sumo_binary,
+                        step_s=args.mobility_step_s,
+                    )
+                with mobility_context as mobility:
+                    row = simulate(profile, seed, variant, admitter=adapter, mobility=mobility)
             finally:
                 adapter.close()
             row["inference_evidence"] = adapter.evidence()

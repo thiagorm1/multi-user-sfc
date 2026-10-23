@@ -51,6 +51,7 @@ def test_search_changes_failed_branch_and_preserves_prefix(monkeypatch):
     monkeypatch.setattr(muvr, "MUVRMAPPOEnv", BranchEnv)
     monkeypatch.setattr(muvr, "dimensions", lambda env: {})
     adapter = muvr.TrainedMUVRMAPPO.__new__(muvr.TrainedMUVRMAPPO)
+    adapter.policy_schema = "muvr_static_v1"
     adapter.settings = SimpleNamespace(mappo_search_attempts=16, n_mappo_regions=1)
     adapter.guidance = None
     adapter.checkpoint_dimensions = {}
